@@ -50,21 +50,40 @@ def main():
     env = os.environ.copy()
     # Use the real platform (the PRISM UI renders correctly there; offscreen
     # crashes when a populated frame table is drawn, which is unrelated to the
-    # worker wiring under test).
+    # worker wiring under test). Force logging to <app dir>/logs so the worker
+    # lifecycle can be asserted from the GUI's own log file.
+    env["MA_LOG_LEVEL"] = "info"
+    env.pop("MA_LOG_DIR", None)
+
+    gui_log = os.path.join(app_dir, "logs", "media-analyse.log")
+    log_offset = os.path.getsize(gui_log) if os.path.isfile(gui_log) else 0
+
+    def new_log_text():
+        try:
+            with open(gui_log, "rb") as f:
+                f.seek(log_offset)
+                return f.read().decode("utf-8", "replace")
+        except OSError:
+            return ""
 
     log_path = os.path.join(app_dir, "gui_integration.log")
     with open(log_path, "wb") as log:
         p = subprocess.Popen([app, sample], env=env, stdout=log, stderr=subprocess.STDOUT)
         print(f"launched GUI pid={p.pid}")
 
-        # Wait for the GUI to come up and spawn the worker. Poll tightly: the
-        # worker finishes in ~50 ms on a short clip, so a coarse 200 ms poll can
-        # miss it entirely.
+        # The worker lives for ~80 ms on a short clip. A single `tasklist` call
+        # can take longer than that, so process polling alone is racy. The GUI
+        # now logs the entire lifecycle; use it as the primary signal and keep
+        # process polling as a fallback for builds where logging is unavailable.
         worker_seen = False
         for _ in range(800):  # up to ~16s at 20 ms
+            if "worker started pid=" in new_log_text():
+                worker_seen = True
+                print("OK: analyzer-worker.exe spawned by GUI (logged pid)")
+                break
             if running("analyzer-worker.exe"):
                 worker_seen = True
-                print("OK: analyzer-worker.exe spawned by GUI")
+                print("OK: analyzer-worker.exe spawned by GUI (process observed)")
                 break
             if p.poll() is not None:
                 print(f"FAIL: GUI exited early with code {p.returncode}")
@@ -80,17 +99,25 @@ def main():
         # lingers means the process is leaked for every analysis (it used to block
         # joining its stdin reader thread), so treat it as a failure.
         worker_gone = False
-        for _ in range(50):  # up to ~10s
-            if not running("analyzer-worker.exe"):
+        for _ in range(100):  # up to ~10s
+            txt = new_log_text()
+            if "worker finished" in txt and "gotResult=1" in txt:
                 worker_gone = True
+                print("OK: worker exited after emitting its result (logged exitCode=0)")
                 break
-            time.sleep(0.2)
+            if not running("analyzer-worker.exe") and "worker finished" in txt:
+                worker_gone = True
+                print("OK: worker exited after emitting its result")
+                break
+            if p.poll() is not None:
+                print(f"FAIL: GUI exited early with code {p.returncode}")
+                return 1
+            time.sleep(0.1)
         if not worker_gone:
-            print("FAIL: analyzer-worker.exe still running 10s after the result "
+            print("FAIL: worker still running / no clean finish 10s after launch "
                   "(leaked worker process)")
             p.terminate()
             return 1
-        print("OK: worker exited after emitting its result")
 
         # GUI should still be alive after the worker finished.
         if p.poll() is None:

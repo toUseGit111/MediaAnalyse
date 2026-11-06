@@ -135,6 +135,10 @@ public:
     // directory is remembered across sessions.
     Q_INVOKABLE QString pickMediaFile();
 
+    // Diagnostics entry point for the packaged (console-less) build.
+    Q_INVOKABLE QString logFolder() const;
+    Q_INVOKABLE void openLogFolder();
+
 signals:
     void busyChanged();
     void stoppingChanged();
@@ -166,6 +170,7 @@ private:
     bool gotResult_ = false;         // a final "result" line was received
     bool userRequestedStop_ = false; // Stop clicked while busy
     int crashRestartCount_ = 0;      // capped auto-restart on worker crash
+    int progressLogTick_ = 0;        // throttle progress log lines
     QString workerPath_;             // path to analyzer-worker.exe
     QString lastDumpPath_;           // dump reported by the worker on stderr
 

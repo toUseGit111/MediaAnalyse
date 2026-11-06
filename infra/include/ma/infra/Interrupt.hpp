@@ -21,6 +21,11 @@ enum class LogLevel { Quiet, Panic, Fatal, Error, Warning, Info, Verbose, Debug,
 // Called implicitly by initFfmpeg().
 void setLogSink(std::function<void(LogLevel, std::string)> sink);
 
+// Route FFmpeg's av_log into the process file logger (credential-redacted).
+// Call once at startup in every binary before initFfmpeg(); otherwise
+// initFfmpeg() installs the same behaviour as its default.
+void useFileLogSink();
+
 // Idempotent process-wide init: avformat_network_init + log sink + version info.
 void initFfmpeg();
 

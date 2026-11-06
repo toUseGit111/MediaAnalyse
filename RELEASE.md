@@ -70,15 +70,18 @@ media-analyse-cli --opt rtsp_transport=tcp rtsp://127.0.0.1:8554/live
 - **worker 生命周期**：worker 输出 `result` 后立即退出（不再阻塞在 stdin 读线程），`tests/gui_integration_test.py` 以「10 s 内必须退出」为硬断言；worker 与 FFmpeg/MinGW DLL 由 `ma_deploy_runtime` ALL 目标在每次构建时对账拷贝，避免只改 worker 时 GUI 目录残留旧副本。
 - **工程结构**：源码目录已从 `media-analyse/` 上移到仓库根，构建产物统一在 `build/<preset>/`；`python scripts/package.py` 产出可分发的 `dist/MediaAnalyse-v1.0/`。
 - **阶段耗时诊断（P3）**：`StageTimings` 记录 open / find_stream_info / demux / total；CLI `timings` 行、`--json` 的 `timings` 对象、GUI「详情」toast 均展示，失败时保留已发生阶段（未到达为 `null`/`—`）。`ser_test` 覆盖其序列化往返（含 `-1 → null → -1`）。
+- **运行日志与诊断收集**：三进程各写一份滚动 UTF-8 日志（含 QML/Qt 警告、FFmpeg `av_log`、worker 生命周期、崩溃应急写入），URL 凭据自动脱敏；GUI 顶栏「日志」按钮 + `collect-logs.cmd` 一键诊断 zip。`tests/log_smoke.py` **17/17 通过**（落盘 / 脱敏 / `off` 零写入 / 滚动代数 / 包内可写），打包产物实跑 GUI 后生成 2 份日志、收集脚本产出 zip 已验证。
 - **fuzz 变异回归** `tests/fuzz_worker.py`：1 万次随机变异 + 截断输入喂给 worker，**0 未处理崩溃**（crash=0 / timeout=0 / abnormal_exit=0）；畸形输入全部被内核转为结构化诊断（`clean_fail`），不崩溃进程。
 
 ## 6. 已知限制与后续待办
 
 - **P2 进程隔离 + minidump + fuzz 已完成**：分析内核拆为独立 `analyzer-worker.exe`，崩溃只杀 worker 并写 `<exedir>/crashes/<app>-<ts>.dmp`（stderr 打 `[CRASHDUMP]` 行）；看门狗最多自动重启一次；`tests/fuzz_worker.py` 跑通 1 万次变异 0 崩溃。**样本库 / golden 回归仍待补**（需实际崩溃样本与流地址清单）。
 - **P3 流媒体剩余**：`protocol_whitelist` 白名单快捷项、TLS / 自签证书 / 鉴权快捷项（阶段耗时分解已完成：open / find_stream_info / demux 贯穿 CLI 与 GUI）。
-- **P5 发布**：绿色包已可脚本化产出——`python scripts/package.py` 从构建树挑出 `media-analyse.exe` + `analyzer-worker.exe` + Qt/FFmpeg DLL + 插件/QML 模块，落到 `dist/MediaAnalyse-v1.0/`（不含测试 exe 与日志）；版本号与变更日志仍为人工维护。
+- **P5 发布**：绿色包已可脚本化产出——`python scripts/package.py` 从构建树挑出 `media-analyse.exe` + `analyzer-worker.exe` + Qt/FFmpeg DLL + 插件/QML 模块，落到 `dist/MediaAnalyse-v1.0/`（不含测试 exe 与运行日志，但预建 `logs/README.txt` 并附带 `collect-logs.cmd`）；版本号与变更日志仍为人工维护。
 
 ## 7. 故障排查
+
+- **使用中出问题但没有线索**：先看 `<包目录>/logs/` 下三份日志（GUI 顶栏「日志」按钮可直接打开）；双击 `collect-logs.cmd` 生成 `MediaAnalyse-diagnostics-<时间戳>.zip`（日志 + 最近 3 个 minidump + 环境信息）回传。装到只读目录时日志自动写到 `%LOCALAPPDATA%\MediaAnalyse\logs`，也可用 `MA_LOG_DIR` / `MA_LOG_LEVEL` 调整。
 
 - 链接报 `Permission denied`：旧进程占用 exe，先 `taskkill /F /IM media-analyse.exe` 再构建。
 - 远程桌面 / 老显卡渲染异常：设 `QT_QUICK_BACKEND=software` 回退软件渲染。

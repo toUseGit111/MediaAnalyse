@@ -206,6 +206,8 @@ def main():
     ap.add_argument("--seed-rng", type=int, default=0, help="RNG seed for reproducibility")
     ap.add_argument("--corpus-dir", default="fuzz-corpus", help="where to save crashing inputs")
     ap.add_argument("--keep-dumps", action="store_true", help="do not delete .dmp files")
+    ap.add_argument("--keep-logs", action="store_true",
+                    help="let each fuzz process write its normal log (slow; for repro debugging)")
     ap.add_argument("--report", default="fuzz_report.json", help="JSON report path")
     ap.add_argument("--env-path", default=None,
                     help="extra PATH to prepend (toolchain runtime DLLs)")
@@ -225,6 +227,12 @@ def main():
     env = dict(os.environ)
     if args.env_path:
         env["PATH"] = args.env_path + os.pathsep + env.get("PATH", "")
+    # Every iteration is a fresh process. With file logging enabled that would
+    # mean thousands of open/rotate cycles for input we intentionally corrupt;
+    # MA_LOG_LEVEL=off is a true zero-write fast path (see infra/Logger.cpp).
+    # Use --keep-logs when debugging a specific crashing repro.
+    if not args.keep_logs:
+        env["MA_LOG_LEVEL"] = "off"
 
     rng = random.Random(args.seed_rng)
     counts = {"ok": 0, "clean_fail": 0, "crash": 0, "timeout": 0,

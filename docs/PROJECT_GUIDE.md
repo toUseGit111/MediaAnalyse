@@ -45,7 +45,7 @@ MediaAnalyse/
 ├─ app/                      QML 界面 + 程序入口
 ├─ cli/                      无界面命令行分析器
 ├─ tests/                    单测 + Python 冒烟/集成/fuzz + 测试素材
-├─ scripts/                  运维脚本（打包）
+├─ scripts/                  运维脚本（打包、一键诊断收集）
 ├─ docs/                     设计稿、截图、验证报告、本说明
 └─ build/                    CMake 构建产物（已 gitignore，可随时删除重建）
 ```
@@ -55,13 +55,13 @@ MediaAnalyse/
 | 目录 | 包含内容 | 边界规则 |
 |---|---|---|
 | `core/` | `Result.hpp`（`Outcome`/`Diagnostic`：**错误即数据**）、`MediaInfo.hpp`（`AnalysisResult`/`StreamInfo`/`FrameRecord`/`StageTimings`）、`Analyzer.hpp`（分析接口 + `AnalysisOptions`）、`UrlNormalizer`（`file:///C:/` → `file:C:/` 等 7 类修正）、`Serialization`（**JSON wire format 契约**：`toJson`/`fromJson`/`parseAnalyzeRequest`） | 不 include 任何 Qt / FFmpeg 头；不含 I/O 策略 |
-| `infra/` | `AvHandle.hpp`（RAII）、`Log.hpp`（`av_log` → stderr 桥接）、`Interrupt.cpp`（分阶段超时 + 协作取消）、`ProbeAnalyzer.cpp`（open → find_stream_info → demux，可选解码）、`CrashHandler.cpp`（minidump + 异常过滤器） | 只依赖 `core` + FFmpeg；不出现 Qt |
+| `infra/` | `AvHandle.hpp`（RAII）、`Log.hpp`（`av_log` → stderr 桥接）、`Interrupt.cpp`（分阶段超时 + 协作取消）、`ProbeAnalyzer.cpp`（open → find_stream_info → demux，可选解码）、`CrashHandler.cpp`（minidump + 异常过滤器）、`Logger.hpp/.cpp`（跨进程滚动文件日志 + 凭据脱敏 + 崩溃应急写入） | 只依赖 `core` + FFmpeg；不出现 Qt |
 | `worker/` | `worker_main.cpp`：从 stdin 读一条 analyze 请求，向 stdout 流式写 progress、最后写 result；独立线程监听 `cancel`；启动即装 CrashHandler | 只链接 `core`+`infra`，**不链接 Qt**；崩溃只死自己 |
 | `bridge/` | `Bridge.hpp/.cpp`：`AnalysisController`（`QProcess` 拉起 worker、解析 JSON、看门狗 + 自动重启一次、取消）、`FrameTableModel`（多列 `QAbstractTableModel` + 文本过滤 + 可见行映射） | 唯一允许同时接触内核与 Qt 的层；QML 只认这一层 |
 | `app/` | `main.cpp`（`QApplication` + 命令行传参自动分析 + CrashHandler）、`qml/`（`Main.qml` 布局交互、`Theme.qml` 设计令牌单例、`PrismButton/SectionHead/MetricCell/StreamCard/FrameGrid` 组件） | QML 不直接碰 C++ 内核，全部经 `bridge` |
 | `cli/` | `main.cpp`：参数解析、human / `--json` 两种输出、退出码约定 | 与 worker 共用同一 `Serialization`，输出格式不会漂移 |
-| `tests/` | `ser_test.cpp`（序列化往返 + 信封 + timings `-1→null→-1`）、`controller_test.cpp`（**无窗口**控制器头测）、`smoke_cli_json.py`（CLI JSON 回归 14 项）、`gui_integration_test.py`（GUI+worker 隔离冒烟）、`fuzz_worker.py`（变异/截断 fuzz）、`assets/sample.mp4`（4 s、320×176 H.264 + AAC 测试素材）、`manual/`（需本地推流环境的手工脚本：`ma_gui_check.py` 窗口截图/驱动、`ma_hls_test.py`、`ma_live_test.py`） | 单测只依赖 `ma_core`，不拖 FFmpeg/Qt；`controller_test` 仅在 `MA_ENABLE_APP=ON` 时构建 |
-| `scripts/` | `package.py`：从构建树挑出运行时文件，产出一个干净的可分发目录 | 幂等；不修改构建树 |
+| `tests/` | `ser_test.cpp`（序列化往返 + 信封 + timings `-1→null→-1`）、`controller_test.cpp`（**无窗口**控制器头测）、`smoke_cli_json.py`（CLI JSON 回归 14 项）、`gui_integration_test.py`（GUI+worker 隔离冒烟）、`fuzz_worker.py`（变异/截断 fuzz）、`log_smoke.py`（日志 17 项回归）、`assets/sample.mp4`（4 s、320×176 H.264 + AAC 测试素材）、`manual/`（需本地推流环境的手工脚本：`ma_gui_check.py` 窗口截图/驱动、`ma_hls_test.py`、`ma_live_test.py`） | 单测只依赖 `ma_core`，不拖 FFmpeg/Qt；`controller_test` 仅在 `MA_ENABLE_APP=ON` 时构建 |
+| `scripts/` | `package.py`：从构建树挑出运行时文件，产出一个干净的可分发目录；`collect-logs.cmd` + `collect_logs.ps1`：一键把日志 / minidump / 环境信息打包成 zip | 幂等；不修改构建树；收集脚本只用 Windows 自带组件 |
 | `docs/` | `design/`（PRISM 设计稿：`design-preview.html`、`media-analyzer.qss`、参考截图、`qt_reference.py`）、`screenshots/`（成品界面 6 张 + `final_ui.png`）、`verification/`（fuzz 报告 JSON）、`PROJECT_GUIDE.md`（本文） | 纯文档资产，不参与构建 |
 
 ### 2.2 数据流（为什么这样分层）
@@ -262,7 +262,38 @@ JSON 信封（成功路径，节选）：
 - 看门狗发现「进程退出但没有 result 行」→ 自动重启 worker **一次**；仍失败则界面内联报错并附 dmp 路径；
 - 用 WinDbg / Visual Studio 打开 `.dmp` 可看崩溃线程与调用栈；把复现输入交给 `tests/fuzz_worker.py --corpus-dir` 可做单步回归。
 
-### 5.4 命令行与 GUI 的对应关系
+### 5.4 运行日志与诊断收集
+
+打包版 GUI 是 WIN32 子系统程序，**没有控制台**：Qt/QML 警告与 FFmpeg 诊断默认全部不可见。为解决「用起来出问题却拿不到任何线索」，三个进程各自写一份滚动 UTF-8 日志：
+
+| 文件 | 记录内容 |
+|---|---|
+| `logs/media-analyse.log` | 启动/退出、exe 路径与工作目录、命令行参数、Qt 消息处理器捕获的 **QML/Qt 警告与错误**、控制器 start/cancel、worker PID、`stderr`、result、退出码、崩溃与自动重启 |
+| `logs/analyzer-worker.log` | 每次请求（输入 URL、选项）、FFmpeg `av_log`、progress、阶段耗时、最终诊断、`result delivered, exiting` |
+| `logs/media-analyse-cli.log` | CLI 调用参数、FFmpeg 版本、分析结果 / 失败诊断 |
+
+**落盘位置**（按优先级选第一个可写目录）：`MA_LOG_DIR` → `<exe 所在目录>/logs`（打包时已预建）→ `%LOCALAPPDATA%\MediaAnalyse\logs` → `%TEMP%\MediaAnalyse\logs`。装到只读目录（如 Program Files）时自动回退到用户目录，不会静默丢日志。
+
+**格式**：`2026-11-06 15:59:44.569 [INFO ] [p23368/t13616] [logger] ...`，带毫秒时间戳、级别、进程/线程号、组件名，一条一行（换行/制表符被转义）。每个进程一个文件，天然避免多进程加锁；Windows 用 `FILE_APPEND_DATA` 追加写、每条即时落盘，因此 worker 的 `std::_Exit()` 或异常崩溃不会丢最后几行。崩溃过滤器另外用无锁的 `emergencyLog` 补一条 `FATAL` + minidump 路径。
+
+**滚动与级别**：默认单文件 5 MB、保留 5 代（`*.1.log` … `*.5.log`）。
+
+| 环境变量 | 说明 |
+|---|---|
+| `MA_LOG_DIR` | 显式指定日志目录 |
+| `MA_LOG_LEVEL` | `debug`（含 FFmpeg verbose） / `info`（默认） / `warn` / `error` / `off` |
+| `MA_LOG_MAX_BYTES` | 滚动阈值，默认 `5242880` |
+| `MA_LOG_MAX_FILES` | 保留代数，默认 `5` |
+
+`off` 走零磁盘写入的快速路径，`tests/fuzz_worker.py` 默认设置它，万次 fuzz 不会因日志变慢或撑爆磁盘。
+
+**脱敏**：URL 的 `user:pass@` 与 `token=` / `password=` / `key=` / `signature=` / `auth=` / `session=` / `api_key=` 等查询参数在写入前一律替换为 `***`（`ma::infra::redact`）。**本地文件路径与主机名不脱敏**，对外分享前请自行审阅。
+
+**排查入口**：GUI 顶栏「**日志**」按钮直接打开日志目录；出问题时双击包内 `collect-logs.cmd`，它会在同目录生成 `MediaAnalyse-diagnostics-<时间戳>.zip`，内含全部滚动日志、最近 3 个 minidump 和 `info.txt`（采集时间、包路径、exe 构建时间、OS、用户、扫描过的目录清单）。把这个 zip 附到问题单即可。脚本只用 Windows 自带的命令行工具，不需要 Python / Qt / 管理员权限。
+
+> 回归验证：`python tests/log_smoke.py`（17 项，覆盖三进程落盘、脱敏、`off` 零写入、滚动代数、包内日志目录可写）。
+
+### 5.5 命令行与 GUI 的对应关系
 
 | GUI 动作 | CLI 等价写法 |
 |---|---|
@@ -291,12 +322,15 @@ python tests/smoke_cli_json.py tests/assets/sample.mp4
 python tests/gui_integration_test.py
 python tests/gui_integration_test.py --app dist/MediaAnalyse-v1.0/media-analyse.exe  # 验证打包结果
 
+# 日志回归（17 项：落盘 / 脱敏 / 滚动 / off / 包内可写）
+python tests/log_smoke.py
+
 # fuzz：随机变异 + 截断，1 万次喂 worker
 python tests/fuzz_worker.py --exe build/win-mingw-app/analyzer-worker.exe \
                             --seed tests/assets/sample.mp4 --mode worker --iters 10000
 ```
 
-判定标准：`ser_test` 打印 `ALL PASS`；`smoke_cli_json.py` 必须 `14/14 checks passed`；fuzz 必须 `crash=0 / timeout=0 / abnormal=0`（`clean_fail` 是畸形输入被转成结构化诊断，属预期）。历史报告见 `docs/verification/`。
+判定标准：`ser_test` 打印 `ALL PASS`；`smoke_cli_json.py` 必须 `14/14 checks passed`；`log_smoke.py` 必须 `17/17 checks passed`；fuzz 必须 `crash=0 / timeout=0 / abnormal=0`（`clean_fail` 是畸形输入被转成结构化诊断，属预期）。历史报告见 `docs/verification/`。
 
 需要真实推流环境的手工脚本在 `tests/manual/`（需自备 `mediamtx` 与 ffmpeg 推流）：
 
@@ -317,6 +351,8 @@ python tests/manual/ma_gui_check.py --exe build/win-mingw-app/media-analyse.exe 
 | Qt 链接报 `__imp___argc` 等符号错误 | 用了 GCC 16 编 GUI，改用 `win-mingw-app` 预设（Qt 配套 MinGW 15.1） |
 | 双击 exe 无窗口 / 提示缺 DLL | 缺 `platforms/qwindows.dll` 或 `qt.conf` 被改坏：重新 build 或重新 `scripts/package.py` |
 | 界面文字/图标异常但功能正常 | 远程桌面/老显卡：设 `QT_QUICK_BACKEND=software` 走软件渲染 |
+| 使用中出现异常但没有任何线索 | 先看 `logs/*.log`（GUI 顶栏「日志」按钮可直接打开目录）；双击 `collect-logs.cmd` 生成诊断 zip 回传 |
+| 日志目录为空 / 找不到日志 | 可能装在只读目录，检查 `%LOCALAPPDATA%\MediaAnalyse\logs` 与 `%TEMP%\MediaAnalyse\logs`；也可用 `MA_LOG_DIR` 显式指定 |
 | 分析无结果、GUI 报 dmp 路径 | 内核崩溃已被隔离，看 `crashes/*.dmp`；用 fuzz 复现输入回归 |
 | 网络流「连不上」 | 先确认 FFmpeg 能拉：`ffprobe <url>`；再试 `--opt rtsp_transport=tcp`、加大 `--probe-timeout` |
 | 改了 QML 没变化 | QML 编进资源，必须重新 build |

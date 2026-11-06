@@ -541,6 +541,16 @@ ApplicationWindow {
                 }
                 Item { Layout.fillWidth: true }
                 PrismButton {
+                    text: "日志"
+                    variant: "ghost"
+                    compact: true
+                    onClicked: {
+                        var d = Analysis.logFolder()
+                        Analysis.openLogFolder()
+                        root.showToast(d.length > 0 ? "日志目录：" + d : "日志未启用")
+                    }
+                }
+                PrismButton {
                     text: "配置"
                     variant: "ghost"
                     compact: true

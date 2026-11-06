@@ -13,7 +13,9 @@ crashes/
 *.dmp
 
 # --- Transient logs ---
+# Runtime logs live in <build>/logs and <dist>/logs; both parents are ignored.
 *.log
+*.log.*
 aqtinstall.log
 
 # --- Python caches ---

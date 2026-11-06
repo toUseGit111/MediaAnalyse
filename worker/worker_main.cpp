@@ -9,6 +9,9 @@
 // Because the kernel (FFmpeg + decoders) runs here and not in the GUI, any fault
 // takes down only this process; the GUI keeps the scene, grabs the minidump and
 // (once) restarts. See REFACTOR_PLAN.md P2.
+//
+// The worker has no console: everything worth debugging (request, FFmpeg's
+// av_log, stage failures, final outcome) goes to logs/analyzer-worker.log.
 #include <atomic>
 #include <cstdlib>
 #include <iostream>
@@ -20,6 +23,9 @@
 #include "ma/core/Result.hpp"
 #include "ma/core/Serialization.hpp"
 #include "ma/infra/CrashHandler.hpp"
+#include "ma/infra/Ffmpeg.hpp"
+#include "ma/infra/Interrupt.hpp"
+#include "ma/infra/Logger.hpp"
 #include "ma/infra/ProbeAnalyzer.hpp"
 
 namespace {
@@ -29,20 +35,27 @@ void emitLine(const std::string& line) {
     std::cout << line << "\n" << std::flush;
 }
 
-} // namespace
+}  // namespace
 
 int main() {
+    ma::infra::initLogger("analyzer-worker");
     ma::infra::installCrashHandler("analyzer-worker");
+    // FFmpeg's own diagnostics are the single most useful thing in a support
+    // bundle; route them into the log (redacted) as well as stderr.
+    ma::infra::useFileLogSink();
+    MA_LOGI("worker", "ready; FFmpeg=" << ma::infra::ffmpegVersionString());
 
     std::string request;
     if (!std::getline(std::cin, request)) {
-        // No request: nothing to do.
+        MA_LOGW("worker", "no request line on stdin - exiting");
         return 0;
     }
+    MA_LOGD("worker", "request=" << ma::infra::redact(request));
 
     std::string input;
     ma::AnalysisOptions opts;
     if (!ma::core::parseAnalyzeRequest(request, input, opts) || input.empty()) {
+        MA_LOGE("worker", "malformed or empty analyze request");
         ma::Diagnostic d;
         d.code = ma::Errc::InvalidArgument;
         d.stage = ma::Stage::NormalizeUrl;
@@ -53,6 +66,15 @@ int main() {
         return 0;
     }
 
+    MA_LOGI("worker", "analyze input=" << ma::infra::redact(input)
+                       << " maxFrames=" << opts.maxFrames
+                       << " decode=" << opts.decodeFrames
+                       << " maxDecode=" << opts.maxDecodeFrames
+                       << " connect=" << opts.connectTimeout
+                       << " stall=" << opts.stallTimeout
+                       << " probe=" << opts.probeTimeout
+                       << " extraOptions=" << opts.extraOptions.size());
+
     std::atomic<bool> cancel{false};
 
     // A dedicated reader consumes any subsequent stdin line (a "cancel" command)
@@ -62,6 +84,7 @@ int main() {
         std::string line;
         while (std::getline(std::cin, line)) {
             if (ma::core::jsonFieldString(line, "type") == "cancel") {
+                MA_LOGI("worker", "cancel requested by GUI");
                 cancel.store(true);
             }
         }
@@ -69,7 +92,13 @@ int main() {
 
     auto analyzer = ma::infra::createProbeAnalyzer();
 
-    ma::ProgressFn progress = [](const ma::Progress& p) {
+    // Progress is high-frequency; sample it so a long stream does not produce
+    // megabytes of near-identical lines.
+    int progressLogTick = 0;
+    ma::ProgressFn progress = [&progressLogTick](const ma::Progress& p) {
+        if (++progressLogTick % 50 == 1)
+            MA_LOGD("worker", "progress packets=" << p.packetsRead
+                              << " elapsed=" << p.elapsedSeconds);
         emitLine("{\"type\":\"progress\",\"packetsRead\":" +
                  std::to_string(p.packetsRead) + ",\"elapsed\":" +
                  std::to_string(p.elapsedSeconds) + "}");
@@ -83,12 +112,34 @@ int main() {
         outcome.diag.stage = ma::Stage::Read;
         outcome.diag.message = std::string("worker exception: ") + e.what();
         outcome.diag.url = input;
+        MA_LOGE("worker", "exception: " << e.what());
     } catch (...) {
         outcome.diag.code = ma::Errc::Internal;
         outcome.diag.stage = ma::Stage::Read;
         outcome.diag.message = "worker unknown exception";
         outcome.diag.url = input;
+        MA_LOGE("worker", "unknown exception");
     }
+
+    const auto& d = outcome.diag;
+    MA_LOGI("worker", "result ok=" << outcome.ok()
+                       << " code=" << ma::toString(d.code)
+                       << " stage=" << ma::toString(d.stage)
+                       << " native=" << d.nativeCode
+                       << " message=" << ma::infra::redact(d.message)
+                       << " hint=" << ma::infra::redact(d.hint)
+                       << " url=" << ma::infra::redact(d.url)
+                       << " streams=" << outcome.value.streams.size()
+                       << " packets=" << outcome.value.totalPacketsRead
+                       << " frames=" << outcome.value.frames.size()
+                       << " elapsed=" << d.elapsedSeconds);
+    if (!outcome.ok())
+        MA_LOGW("worker", "failed diagnostic: " << ma::infra::redact(d.message));
+    const auto& t = outcome.value.timings;
+    MA_LOGI("worker", "timings open=" << t.openSeconds
+                       << " probe=" << t.probeSeconds
+                       << " demux=" << t.demuxSeconds
+                       << " total=" << t.totalSeconds);
 
     // Always emit a final result line (ok or structured error). The GUI treats
     // a worker process that exits WITHOUT a result line as a crash.
@@ -100,7 +151,9 @@ int main() {
     // GUI holds the pipe open - i.e. one leaked worker per analysis. The result
     // line is already flushed, so leave immediately without unwinding: _Exit
     // avoids running static destructors while another thread is inside the C++
-    // iostream implementation.
+    // iostream implementation. Every log record has already been written to the
+    // OS file handle, so no explicit logger shutdown is needed here.
+    MA_LOGI("worker", "result delivered, exiting");
     std::cout.flush();
     std::_Exit(0);
 }

@@ -32,6 +32,7 @@
 #include "ma/infra/Interrupt.hpp"
 #include "ma/infra/ProbeAnalyzer.hpp"
 #include "ma/infra/CrashHandler.hpp"
+#include "ma/infra/Logger.hpp"
 
 namespace {
 
@@ -167,9 +168,25 @@ void printHuman(const ma::AnalysisResult& r, const ma::Diagnostic& d, const CliA
 } // namespace
 
 int main(int argc, char** argv) {
+    ma::infra::initLogger("media-analyse-cli");
     ma::infra::installCrashHandler("media-analyse-cli");
+    ma::infra::useFileLogSink();
+    struct LogCloser {
+        ~LogCloser() { ma::infra::closeLogger(); }
+    } logCloser;
+    (void)logCloser;
+
     std::vector<std::string> a(argv + 1, argv + argc);
     CliArgs args;
+    {
+        std::string cmdline;
+        for (size_t k = 1; k < static_cast<size_t>(argc); ++k) {
+            if (k > 1) cmdline += " ";
+            cmdline += argv[k];
+        }
+        MA_LOGI("cli", "invocation: " << ma::infra::redact(cmdline)
+                       << " | FFmpeg=" << ma::infra::ffmpegVersionString());
+    }
 
     size_t i = 0;
     for (; i < a.size(); ++i) {
@@ -220,9 +237,25 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    MA_LOGI("cli", "analyze input=" << ma::infra::redact(args.input)
+                    << " maxFrames=" << args.opts.maxFrames
+                    << " decode=" << args.opts.decodeFrames
+                    << " json=" << args.json
+                    << " frames=" << args.printFrames);
+
     auto analyzer = ma::infra::createProbeAnalyzer();
     ma::CancelFlag cancel{false};
     auto outcome = analyzer->analyze(args.input, args.opts, &cancel, {});
+
+    const auto& od = outcome.diag;
+    MA_LOGI("cli", "result ok=" << outcome.ok()
+                    << " code=" << ma::toString(od.code)
+                    << " stage=" << ma::toString(od.stage)
+                    << " native=" << od.nativeCode
+                    << " message=" << ma::infra::redact(od.message)
+                    << " url=" << ma::infra::redact(od.url)
+                    << " packets=" << outcome.value.totalPacketsRead
+                    << " elapsed=" << od.elapsedSeconds);
 
     if (args.json)
         std::fputs(ma::core::toJson(outcome.value, outcome.diag, args.printFrames, "",

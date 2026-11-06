@@ -18,6 +18,7 @@ add_library(ma_infra STATIC
     src/Interrupt.cpp
     src/ProbeAnalyzer.cpp
     src/CrashHandler.cpp
+    src/Logger.cpp
 )
 add_library(ma::infra ALIAS ma_infra)
 

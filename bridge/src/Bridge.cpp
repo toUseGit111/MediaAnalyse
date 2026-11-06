@@ -4,6 +4,7 @@
 #include <algorithm>
 
 #include <QClipboard>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -12,7 +13,9 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStringList>
+#include <QUrl>
 
+#include "ma/infra/Logger.hpp"
 #include "ma/infra/ProbeAnalyzer.hpp"
 
 namespace ma::bridge {
@@ -176,6 +179,9 @@ AnalysisController::AnalysisController(QObject* parent)
     // window stay alive (see P2 / REFACTOR_PLAN.md).
     workerPath_ = QDir(QGuiApplication::applicationDirPath())
                       .filePath(QStringLiteral("analyzer-worker.exe"));
+    MA_LOGI("bridge", "controller created; worker="
+                          << workerPath_.toUtf8().constData()
+                          << " log=" << ma::infra::logFilePath());
     connect(&worker_, &QProcess::readyReadStandardOutput, this,
             &AnalysisController::onWorkerOutput);
     connect(&worker_, &QProcess::readyReadStandardError, this,
@@ -227,9 +233,25 @@ QString AnalysisController::pickMediaFile() {
 
     settings.setValue(QStringLiteral("lastMediaDir"),
                       QFileInfo(path).absolutePath());
+    MA_LOGI("bridge", "picked file=" << ma::infra::redact(
+                           QDir::fromNativeSeparators(path).toUtf8().toStdString()));
     // Qt already returns '/', but be explicit: FFmpeg's Windows file protocol
     // and ma::normalizeUrl() both expect forward slashes.
     return QDir::fromNativeSeparators(path);
+}
+
+QString AnalysisController::logFolder() const {
+    return QString::fromUtf8(ma::infra::logDirectory().c_str());
+}
+
+void AnalysisController::openLogFolder() {
+    const QString dir = logFolder();
+    if (dir.isEmpty()) {
+        MA_LOGW("bridge", "openLogFolder called but logging is disabled");
+        return;
+    }
+    MA_LOGI("bridge", "opening log folder=" << dir.toUtf8().constData());
+    QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
 }
 
 static QVariantMap diagToMap(const ma::Diagnostic& d,
@@ -281,6 +303,13 @@ void AnalysisController::start(const QString& rawInput, const QVariantMap& optio
     // uses the local 8-bit codepage (GBK on zh-CN), which corrupts non-ASCII
     // paths picked from the file dialog.
     const std::string input = rawInput.toUtf8().toStdString();
+    MA_LOGI("bridge", "start input=" << ma::infra::redact(input)
+                       << " maxFrames=" << opts.maxFrames
+                       << " decode=" << opts.decodeFrames
+                       << " connect=" << opts.connectTimeout
+                       << " stall=" << opts.stallTimeout
+                       << " probe=" << opts.probeTimeout
+                       << " extraOptions=" << opts.extraOptions.size());
     busy_ = true;
     stopping_ = false;
     emit busyChanged();
@@ -302,6 +331,7 @@ void AnalysisController::cancel() {
     // analysis and not an error. The redesigned UI also keeps Stop as a
     // separate button, so this race cannot be triggered from the main action.
     if (!busy_) return;
+    MA_LOGI("bridge", "cancel requested by user");
     userRequestedStop_ = true;
     stopping_ = true;
     emit stoppingChanged();
@@ -417,8 +447,19 @@ void AnalysisController::finishWith(ma::Outcome<ma::AnalysisResult> outcome) {
     const bool userStopped =
         (outcome.diag.code == ma::Errc::Cancelled || stopRequested) && !hardError;
     const bool failed = !outcome.ok();
+    MA_LOGI("bridge", "finish failed=" << failed
+                       << " userStopped=" << userStopped
+                       << " hardError=" << hardError
+                       << " code=" << ma::toString(outcome.diag.code)
+                       << " stage=" << ma::toString(outcome.diag.stage)
+                       << " message=" << ma::infra::redact(outcome.diag.message)
+                       << " frames=" << outcome.value.frames.size()
+                       << " packets=" << outcome.value.totalPacketsRead
+                       << " elapsed=" << outcome.diag.elapsedSeconds);
 
     if (failed && !userStopped) {
+        MA_LOGE("bridge", "analysis failed: " << ma::infra::redact(
+                              outcome.diag.message));
         statusText_ = tr("Failed: %1").arg(
             QString::fromStdString(outcome.diag.message));
         emit statusTextChanged();
@@ -550,12 +591,17 @@ void AnalysisController::launchWorker(const std::string& req) {
     workerStdoutBuffer_.clear();
     workerStderrBuffer_.clear();
     lastDumpPath_.clear();
+    progressLogTick_ = 0;
+    MA_LOGI("bridge", "launch worker=" << workerPath_.toUtf8().constData()
+                       << " restartCount=" << crashRestartCount_);
 
     if (worker_.state() != QProcess::NotRunning) worker_.kill();
 
     worker_.setProcessChannelMode(QProcess::SeparateChannels);
     worker_.start(workerPath_, QStringList());
     if (!worker_.waitForStarted(5000)) {
+        MA_LOGE("bridge", "worker failed to start: "
+                              << workerPath_.toUtf8().constData());
         // Could not launch the helper at all: report it inline and keep the
         // window alive - never let a missing worker crash the GUI.
         ma::Diagnostic d;
@@ -572,6 +618,7 @@ void AnalysisController::launchWorker(const std::string& req) {
         emit stoppingChanged();
         return;
     }
+    MA_LOGI("bridge", "worker started pid=" << worker_.processId());
     std::string framed = req + "\n";
     worker_.write(framed.c_str(), static_cast<qint64>(framed.size()));
     // The write channel is intentionally kept open so cancel() can send a
@@ -594,6 +641,8 @@ void AnalysisController::handleWorkerLine(const std::string& line) {
     if (t == "progress") {
         const int64_t pk = ma::core::jsonFieldInt(line, "packetsRead");
         const double el = ma::core::jsonFieldDouble(line, "elapsed");
+        if (++progressLogTick_ % 50 == 1)
+            MA_LOGD("bridge", "worker progress packets=" << pk << " elapsed=" << el);
         emit progressUpdated(pk, el);
         return;
     }
@@ -603,15 +652,37 @@ void AnalysisController::handleWorkerLine(const std::string& line) {
     ma::Diagnostic d;
     if (ma::core::fromJson(line, r, d)) {
         gotResult_ = true;
+        MA_LOGI("bridge", "worker result: code=" << ma::toString(d.code)
+                          << " stage=" << ma::toString(d.stage)
+                          << " native=" << d.nativeCode
+                          << " message=" << ma::infra::redact(d.message)
+                          << " url=" << ma::infra::redact(d.url)
+                          << " streams=" << r.streams.size()
+                          << " packets=" << r.totalPacketsRead
+                          << " frames=" << r.frames.size()
+                          << " elapsed=" << d.elapsedSeconds);
         ma::Outcome<ma::AnalysisResult> outcome;
         outcome.value = std::move(r);
         outcome.diag = d;
         finishWith(std::move(outcome));
+    } else {
+        MA_LOGW("bridge", "unparsable worker line: "
+                              << line.substr(0, 200));
     }
 }
 
 void AnalysisController::onWorkerError() {
-    workerStderrBuffer_ += worker_.readAllStandardError().toStdString();
+    const std::string chunk = worker_.readAllStandardError().toStdString();
+    // The worker has no console. Its stderr (FFmpeg diagnostics, crash notices)
+    // used to be buffered only for the [CRASHDUMP] marker and then discarded;
+    // keep a copy in the GUI log so a support bundle explains WHY it failed.
+    if (!chunk.empty()) {
+        if (chunk.find("[CRASHDUMP]") != std::string::npos)
+            MA_LOGE("worker.stderr", ma::infra::redact(chunk));
+        else
+            MA_LOGW("worker.stderr", ma::infra::redact(chunk));
+    }
+    workerStderrBuffer_ += chunk;
     // The worker prints "[CRASHDUMP] <path>" on stderr before it dies; capture
     // it so we can surface the exact dump in the failure notice.
     size_t pos;
@@ -628,11 +699,13 @@ void AnalysisController::onWorkerError() {
 }
 
 void AnalysisController::onWorkerFinished(int exitCode, QProcess::ExitStatus status) {
-    Q_UNUSED(exitCode);
-    Q_UNUSED(status);
+    MA_LOGI("bridge", "worker finished exitCode=" << exitCode
+                       << " crashExit=" << (status == QProcess::CrashExit)
+                       << " gotResult=" << gotResult_);
     // Drain any final buffered stdout before deciding the worker crashed.
     if (worker_.bytesAvailable() > 0) onWorkerOutput();
     if (gotResult_) return;  // finishWith already handled a clean result
+    MA_LOGE("bridge", "worker exited without a result line - treating as crash");
     handleWorkerCrash();
 }
 
@@ -642,11 +715,16 @@ void AnalysisController::handleWorkerCrash() {
     const QString hint = dump.isEmpty()
                              ? tr("分析子进程异常退出且未生成转储")
                              : (tr("minidump: ") + dump);
+    MA_LOGE("bridge", "worker crash handling, restartCount=" << crashRestartCount_
+                          << " dump=" << dump.toUtf8().constData()
+                          << " diag=" << ma::infra::redact(
+                                 workerStderrBuffer_.substr(0, 500)));
 
     // Auto-restart once: a transient decoder/FFmpeg fault shouldn't take the
     // whole session down. A consistently crashing input gives up after that.
     if (crashRestartCount_ < 1) {
         ++crashRestartCount_;
+        MA_LOGW("bridge", "auto-restarting worker once");
         statusText_ = tr("分析子进程崩溃，正在自动重启...");
         emit statusTextChanged();
         launchWorker(lastReq_);

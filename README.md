@@ -205,6 +205,18 @@ python tests/fuzz_worker.py --exe build/win-mingw/cli/media-analyse-cli.exe \
 
 任何 `crash` / `abnormal_exit` 都会让脚本以非零退出码结束，可直接作为 CI 红线。
 
+## 运行日志与诊断收集（打包版可用）
+
+打包版 GUI 没有控制台，Qt/QML 警告和 FFmpeg 输出原本全部不可见。现在 GUI / worker / CLI 三个进程各写一份滚动 UTF-8 日志到 `logs/`（`<exe目录>/logs` 优先，只读安装自动回退 `%LOCALAPPDATA%\MediaAnalyse\logs`）：
+
+- `media-analyse.log`：启动参数、QML/Qt 警告、控制器与 worker 生命周期（PID / stderr / result / 退出码 / 崩溃重启）；
+- `analyzer-worker.log`：请求、FFmpeg `av_log`、阶段耗时、最终诊断；
+- `media-analyse-cli.log`：CLI 调用与结果。
+
+每行带毫秒时间戳、级别、进程/线程号、组件名；默认 5 MB × 5 代滚动；URL 凭据（`user:pass@`、`token=`、`key=` 等）自动替换为 `***`。可用 `MA_LOG_DIR` / `MA_LOG_LEVEL`（含 `off`）/ `MA_LOG_MAX_BYTES` / `MA_LOG_MAX_FILES` 调整。
+
+**排查入口**：GUI 顶栏「日志」按钮打开日志目录；双击包内 `collect-logs.cmd` 一键生成 `MediaAnalyse-diagnostics-<时间戳>.zip`（滚动日志 + 最近 3 个 minidump + `info.txt`），直接附到问题单。回归见 `python tests/log_smoke.py`（17 项），详见 `docs/PROJECT_GUIDE.md` §5.4。
+
 ## 当前进度
 
 - [x] P0 部分：CMake 工程、依赖锁定（preset 中写死路径）、CLI 与 GUI 双构建
@@ -212,6 +224,7 @@ python tests/fuzz_worker.py --exe build/win-mingw/cli/media-analyse-cli.exe \
 - [x] P4：PRISM 设计系统 QML 界面（App Bar / Source / Overview / Notice / Streams / Toolbar / Dataview / Status）、`QAbstractTableModel` 虚拟表格 + 文本过滤、矩形选区、内联诊断
 - [x] P3 部分：协议自动识别、FFmpeg 高级选项透传（含 RTSP over TCP / 自动重连预设）、探测超时配置
 - [x] P2：worker 进程隔离（QProcess + 行分隔 JSON IPC）、minidump（CrashHandler + `[CRASHDUMP]`）、fuzz 变异回归（`tests/fuzz_worker.py`）已落地并通过 1 万次变异 0 崩溃冒烟
+- [x] 运行日志与诊断收集：跨进程滚动日志（QML 警告 / FFmpeg 输出 / 凭据脱敏）、GUI「日志」按钮、`collect-logs.cmd` 一键收集；`tests/log_smoke.py` 17/17 通过
 - [ ] P2 剩余：样本库与 golden 回归（等实际崩溃样本与流地址清单）
 - [x] P3 部分：诊断面板阶段耗时分解（open / find_stream_info / demux，贯穿 CLI human + `--json` + GUI 详情）
 - [ ] P3 剩余：`protocol_whitelist` 白名单快捷项、TLS / 自签证书 / 鉴权快捷项

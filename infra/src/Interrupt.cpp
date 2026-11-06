@@ -6,6 +6,7 @@
 #include <string>
 
 #include "ma/infra/Ffmpeg.hpp"
+#include "ma/infra/Logger.hpp"
 
 namespace ma::infra {
 
@@ -15,7 +16,11 @@ std::function<void(LogLevel, std::string)> g_sink;
 std::mutex g_sinkMutex;
 
 void avLogThunk(void* /*avcl*/, int level, const char* fmt, va_list vl) {
-    if (level > AV_LOG_INFO) return; // default sink hides verbose spam
+    // MA_LOG_LEVEL=debug also unlocks FFmpeg's verbose/debug diagnostics; the
+    // default stays at INFO so a long stream cannot flood the log file.
+    const int ceiling =
+        (logLevel() <= Severity::Debug) ? AV_LOG_DEBUG : AV_LOG_INFO;
+    if (level > ceiling) return;
     char buf[2048];
     int prefix = 1;
     av_log_format_line2(nullptr, level, fmt, vl, buf, sizeof(buf), &prefix);
@@ -41,17 +46,34 @@ void setLogSink(std::function<void(LogLevel, std::string)> sink) {
     av_log_set_callback(avLogThunk);
 }
 
+namespace {
+Severity severityFor(LogLevel lv) {
+    switch (lv) {
+    case LogLevel::Panic:
+    case LogLevel::Fatal: return Severity::Fatal;
+    case LogLevel::Error: return Severity::Error;
+    case LogLevel::Warning: return Severity::Warning;
+    case LogLevel::Info: return Severity::Info;
+    default: return Severity::Debug;
+    }
+}
+}  // namespace
+
+void useFileLogSink() {
+    setLogSink([](LogLevel lv, std::string msg) {
+        // Keep the console behaviour for CLI users, AND make the same text
+        // recoverable from the shipped (console-less) GUI build.
+        std::fputs(msg.c_str(), stderr);
+        logMessage(severityFor(lv), "ffmpeg", redact(msg));
+    });
+}
+
 void initFfmpeg() {
     static bool done = false;
     if (done) return;
     done = true;
     avformat_network_init();
-    if (!g_sink) {
-        setLogSink([](LogLevel lv, std::string msg) {
-            (void)lv;
-            std::fputs(msg.c_str(), stderr);
-        });
-    }
+    if (!g_sink) useFileLogSink();
 }
 
 const char* ffmpegVersionString() {
