@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>媒体分析器 · UI 重设计稿 PRISM</title>
+<style>
+/* ==========================================================================
+   Canvas (light, matching the host IDE theme).
+   The dark panel below is the DESIGN ARTIFACT — the proposed app UI.
+   ========================================================================== */
+:root{
+  --paper:#EFEDE8; --paper-2:#E7E4DD; --paper-line:#D9D5CC;
+  --ink:#23262B; --ink-2:#5E6672; --ink-3:#8A9099;
+  --amber-dark:#9A6A1E;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font-family:"Segoe UI","Microsoft YaHei UI",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;}
+.canvas{max-width:1240px;margin:0 auto;padding:28px 28px 56px}
+.canvas-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:20px;flex-wrap:wrap}
+.kicker{font-size:10px;font-weight:700;letter-spacing:.16em;color:var(--amber-dark);text-transform:uppercase;margin-bottom:8px}
+h1{font-size:23px;line-height:1.25;margin:0;font-weight:650;letter-spacing:-.01em}
+.sub{font-size:12px;color:var(--ink-2);margin-top:7px;line-height:1.6}
+.view-switch{display:flex;gap:2px;background:var(--paper-2);border:1px solid var(--paper-line);border-radius:8px;padding:3px}
+.view-switch button{border:0;background:transparent;color:var(--ink-2);font:600 12px "Segoe UI","Microsoft YaHei UI",sans-serif;
+  padding:8px 15px;border-radius:6px;cursor:pointer;transition:background .15s,color .15s}
+.view-switch button:hover{color:var(--ink)}
+.view-switch button[aria-selected="true"]{background:#FFFFFF;color:var(--ink);box-shadow:0 1px 2px rgba(30,34,40,.10)}
+.stage{background-image:radial-gradient(var(--paper-line) .8px,transparent .8px);background-size:16px 16px;
+  border:1px solid var(--paper-line);border-radius:12px;padding:22px;overflow:hidden}
+.canvas-foot{margin-top:14px;font-size:11px;color:var(--ink-3);line-height:1.7}
+
+/* ==========================================================================
+   APP WINDOW — PRISM design tokens
+   ========================================================================== */
+.app{--bg:#14171B;--sunken:#101317;--s1:#1B1F25;--s2:#232830;--s3:#2C333D;
+  --line:#2A3038;--line-2:#363E49;--line-3:#4C5663;
+  --t1:#E8EAED;--t2:#A9B2BE;--t3:#7E8998;--t4:#5B6572;
+  --ac:#E0A44A;--ac-hi:#EFC06C;--ac-wash:#33291B;--ac-ink:#1A1509;
+  --video:#82A9CC;--audio:#C99A72;--ok:#86B49A;--err:#D97B72;
+  --mono:"Cascadia Mono","Consolas","SFMono-Regular",monospace;
+  background:var(--bg);color:var(--t1);border:1px solid #3A414B;border-radius:10px;
+  box-shadow:0 18px 48px rgba(20,24,30,.28),0 2px 6px rgba(20,24,30,.18);
+  font-size:13px;overflow:hidden}
+.app *{box-sizing:border-box}
+.app button{font-family:inherit;cursor:pointer}
+.app button:focus-visible,.app input:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+
+/* App bar */
+.appbar{display:flex;align-items:center;gap:12px;height:48px;padding:0 16px 0 18px;
+  background:var(--sunken);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:9px}
+.brand svg{display:block}
+.brand-name{font-size:14px;font-weight:650;letter-spacing:.01em}
+.brand-en{font-family:var(--mono);font-size:10px;color:var(--t3);letter-spacing:.12em;margin-left:2px}
+.appbar-rule{width:1px;height:18px;background:var(--line-2);margin:0 4px}
+.appbar-tag{font-size:11px;color:var(--t3)}
+.appbar-sp{flex:1}
+.win-dots{display:flex;gap:14px;align-items:center;color:var(--t3);font-size:13px;margin-left:6px}
+.win-dots span{width:12px;height:12px;display:grid;place-items:center;line-height:1}
+
+/* Body */
+.body{padding:18px 20px 0}
+.sec{margin-bottom:16px}
+.sec-head{display:flex;align-items:center;gap:9px;margin-bottom:9px}
+.sec-label{font-size:10px;font-weight:700;letter-spacing:.14em;color:var(--t3);text-transform:uppercase}
+.sec-hint{font-size:11px;color:var(--t4)}
+.sec-line{flex:1;height:1px;background:var(--line)}
+
+/* Source bar */
+.source{background:var(--s1);border:1px solid var(--line);border-radius:8px;padding:13px 15px}
+.field-label{font-size:11px;font-weight:600;color:var(--t2);margin-bottom:7px;display:block}
+.path-row{display:flex;gap:8px;align-items:center}
+.path{flex:1;min-width:0;display:flex;align-items:center;gap:9px;background:var(--sunken);
+  border:1px solid var(--line-2);border-radius:6px;padding:0 11px;height:34px;transition:border-color .12s}
+.path:focus-within{border-color:var(--ac)}
+.path svg{flex:none;color:var(--t3)}
+.path input{flex:1;min-width:0;background:transparent;border:0;outline:0;color:var(--t1);
+  font:12px var(--mono);letter-spacing:.01em}
+.path input::placeholder{color:var(--t3)}
+.path .ext{font:600 10px var(--mono);color:var(--ac);background:var(--ac-wash);
+  border:1px solid #6B5227;border-radius:3px;padding:2px 6px;letter-spacing:.04em}
+.btn{height:34px;display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  border-radius:6px;padding:0 14px;font-size:12px;font-weight:600;white-space:nowrap;
+  transition:background .12s,border-color .12s,color .12s,transform .08s}
+.btn:active{transform:translateY(1px)}
+.btn-primary{background:var(--ac);color:var(--ac-ink);border:1px solid var(--ac)}
+.btn-primary:hover{background:var(--ac-hi);border-color:var(--ac-hi)}
+.btn-secondary{background:var(--s2);color:var(--t1);border:1px solid var(--line-2)}
+.btn-secondary:hover{background:var(--s3);border-color:var(--line-3)}
+.btn-ghost{background:transparent;color:var(--t2);border:1px solid transparent}
+.btn-ghost:hover{background:var(--s2);color:var(--t1)}
+.btn:disabled{background:var(--s1);color:var(--t4);border-color:var(--line);cursor:not-allowed;transform:none}
+.source-foot{display:flex;align-items:center;gap:10px;margin-top:10px}
+.source-foot .hint{font-size:11px;color:var(--t3);flex:1}
+.toggle{height:30px;display:inline-flex;align-items:center;gap:7px;background:var(--sunken);
+  color:var(--t2);border:1px solid var(--line-2);border-radius:6px;padding:0 11px;font-size:11px;font-weight:600}
+.toggle[aria-pressed="true"]{background:var(--ac-wash);color:var(--ac);border-color:#6B5227}
+.toggle .box{width:13px;height:13px;border:1px solid var(--line-3);border-radius:3px;display:grid;place-items:center;
+  font-size:9px;line-height:1;color:var(--ac-ink);background:transparent}
+.toggle[aria-pressed="true"] .box{background:var(--ac);border-color:var(--ac)}
+
+/* ---- Input source: local file / network stream ---- */
+.src-mode{display:flex;align-items:center;gap:8px}
+.segmented{display:inline-flex;background:var(--sunken);border:1px solid var(--line-2);
+  border-radius:7px;padding:2px;gap:2px}
+.segmented button{height:26px;padding:0 13px;border:0;border-radius:5px;background:transparent;
+  color:var(--t3);font-size:11px;font-weight:600;display:inline-flex;align-items:center;gap:6px;
+  transition:background .12s,color .12s}
+.segmented button:hover{color:var(--t1)}
+.segmented button[aria-selected="true"]{background:var(--s3);color:var(--t1);
+  box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.segmented button[aria-selected="true"] .seg-dot{background:var(--ac)}
+.seg-dot{width:6px;height:6px;border-radius:50%;background:var(--t4)}
+.src-panel{display:none}
+.src-panel.on{display:block}
+
+/* Network stream: ONE address in, protocol detected out. No pickers,
+   transport/buffer combos, credentials, timeouts or window settings. */
+.proto-tag{flex:none;height:34px;display:inline-flex;align-items:center;
+  color:var(--video);background:#1C2731;border:1px solid #35506A;border-radius:6px;
+  padding:0 10px;font:600 10px var(--mono);letter-spacing:.04em;white-space:nowrap}
+.proto-tag::before{content:"AUTO · ";color:var(--t3);font-weight:600;margin-right:2px}
+.proto-tag.unknown{color:#D97B72;background:#2B1D1C;border-color:#A05B50}
+.proto-tag.unknown::before{content:""}
+.path.invalid{border-color:#A05B50}
+.source-foot .hint b{color:var(--t2);font-weight:600;font-family:var(--mono)}
+.source-foot .hint.warn{color:#D97B72}
+
+/* Source readout / live status */
+.live-status{display:flex;align-items:center;gap:10px;margin-top:10px;padding-top:10px;
+  border-top:1px solid var(--line);flex-wrap:wrap}
+.live-badge{font:700 10px var(--mono);letter-spacing:.08em;color:var(--ac);
+  background:var(--ac-wash);border:1px solid #6B5227;border-radius:4px;padding:3px 7px;
+  white-space:nowrap;display:inline-flex;align-items:center}
+.live-badge .pulse{display:inline-block;width:6px;height:6px;border-radius:50%;
+  background:var(--ac);margin-right:6px}
+.live-badge.file{color:var(--t2);background:var(--s2);border-color:var(--line-2)}
+.live-badge.file .pulse{background:var(--ok)}
+.live-stat{font:11px var(--mono);color:var(--t3);white-space:nowrap}
+.live-stat b{color:var(--t1);font-weight:600}
+.live-status .sp{flex:1}
+
+.notice.info{background:#16232B;border-color:#2F4B5B;border-left-color:var(--video)}
+.notice.info .ntxt{color:#C3D6E4}
+.notice.info .ntxt b{color:var(--video)}
+.metric .m-value.live{font-size:16px;color:var(--ac);letter-spacing:.06em}
+
+/* Metric strip */
+.metrics{background:var(--sunken);border:1px solid var(--line);border-radius:8px;
+  display:grid;grid-template-columns:repeat(5,1fr);padding:12px 0}
+.metric{padding:2px 16px;border-right:1px solid var(--line)}
+.metric:last-child{border-right:0}
+.metric .m-label{font-size:10px;font-weight:700;letter-spacing:.1em;color:var(--t3);text-transform:uppercase;margin-bottom:7px}
+.metric .m-value{font:500 20px/1.1 var(--mono);color:var(--t1);letter-spacing:-.02em;white-space:nowrap}
+.metric .m-value .u{font-size:11px;color:var(--t3);margin-left:4px;letter-spacing:0}
+.metric .m-note{font:10px var(--mono);color:var(--t4);margin-top:5px}
+.metric.accent .m-value{color:var(--ac)}
+
+/* Notice */
+.notice{display:flex;align-items:center;gap:10px;background:#241E14;border:1px solid #4A3A21;
+  border-left:3px solid var(--ac);border-radius:6px;padding:9px 12px;margin-bottom:16px}
+.notice svg{flex:none}
+.notice .ntxt{font-size:12px;color:#E6D3B0;flex:1;line-height:1.5}
+.notice .ntxt b{color:var(--ac);font-weight:650}
+.notice .nlink{font-size:11px;color:var(--t3);background:transparent;border:0;padding:4px 6px;text-decoration:underline;text-underline-offset:2px}
+.notice .nlink:hover{color:var(--t1)}
+.notice .nclose{background:transparent;border:0;color:var(--t3);font-size:16px;line-height:1;padding:2px 4px}
+.notice .nclose:hover{color:var(--t1)}
+
+/* Stream cards */
+.streams{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.card{background:var(--s1);border:1px solid var(--line);border-top:2px solid var(--line-3);
+  border-radius:8px;padding:13px 15px;transition:border-color .12s}
+.card:hover{border-color:var(--line-2)}
+.card.video, .card.video:hover{border-top-color:var(--video)}
+.card.audio, .card.audio:hover{border-top-color:var(--audio)}
+.card-head{display:flex;align-items:center;gap:9px;margin-bottom:12px}
+.card-id{font:700 11px var(--mono);letter-spacing:.02em}
+.video .card-id{color:var(--video)} .audio .card-id{color:var(--audio)}
+.card-title{font-size:13px;font-weight:650;color:var(--t1)}
+.card-codec{font:600 10px var(--mono);color:var(--t3);background:var(--sunken);
+  border:1px solid var(--line);border-radius:3px;padding:2px 6px;margin-left:auto;letter-spacing:.04em}
+.kv{display:grid;grid-template-columns:repeat(4,1fr);grid-template-rows:auto auto;
+  grid-auto-flow:column;column-gap:12px;row-gap:4px;margin:0;font-size:12px}
+.kv dt{color:var(--t3);font-size:10px;font-weight:700;letter-spacing:.06em}
+.kv dd{margin:0;color:var(--t2);font:12px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kv dd strong{color:var(--t1);font-weight:600}
+
+/* Table toolbar */
+.toolbar{display:flex;align-items:center;gap:2px;background:var(--s1);border-bottom:1px solid var(--line);
+  padding:0 12px;height:44px;margin:0 -20px;padding-left:20px;padding-right:20px}
+.tabs{display:flex;align-self:stretch}
+.tab{background:transparent;border:0;border-bottom:2px solid transparent;color:var(--t3);
+  padding:0 16px;font-size:13px;font-weight:500;display:flex;align-items:center;gap:8px;
+  transition:background .12s,color .12s}
+.tab:hover{background:var(--s1);color:var(--t1)}
+.tab[aria-selected="true"]{color:var(--t1);font-weight:650;border-bottom-color:var(--ac);background:var(--s1)}
+.tab .cnt{font:600 10px var(--mono);color:var(--t3);background:var(--sunken);
+  border:1px solid var(--line);border-radius:10px;padding:1px 6px}
+.tab[aria-selected="true"] .cnt{color:var(--ac);border-color:#6B5227;background:var(--ac-wash)}
+.toolbar-sp{flex:1}
+.search{display:flex;align-items:center;gap:7px;background:var(--sunken);border:1px solid var(--line-2);
+  border-radius:6px;height:30px;padding:0 9px;width:168px;transition:border-color .12s}
+.search:focus-within{border-color:var(--ac)}
+.search svg{flex:none;color:var(--t3)}
+.search input{width:100%;background:transparent;border:0;outline:0;color:var(--t1);font-size:11px}
+.search input::placeholder{color:var(--t3)}
+.tb-div{width:1px;height:18px;background:var(--line-2);margin:0 10px}
+.copy-btn{height:30px;padding:0 12px;font-size:11px}
+
+/* Table */
+.table-wrap{margin:0 -20px;overflow:auto;max-height:298px;background:var(--sunken);
+  border-bottom:1px solid var(--line)}
+table{border-collapse:separate;border-spacing:0;width:100%;font:12px var(--mono)}
+thead th{position:sticky;top:0;z-index:3;background:var(--s1);color:var(--t2);
+  font:600 11px "Segoe UI","Microsoft YaHei UI",sans-serif;text-align:right;
+  padding:9px 8px;border-right:1px solid var(--line);border-bottom:1px solid var(--line-2);white-space:nowrap}
+thead th:first-child{left:0;z-index:4;text-align:right}
+thead th:last-child{border-right:0}
+tbody td{padding:6px 8px;text-align:right;color:var(--t2);border-right:1px solid #1D2229;
+  border-bottom:1px solid #1B1F25;white-space:nowrap;height:30px;
+  font-variant-numeric:tabular-nums;user-select:none;cursor:crosshair}
+tbody td:last-child{border-right:0}
+tbody tr:nth-child(even) td{background:#161A20}
+tbody tr:hover td{background:var(--s2)}
+tbody td:first-child{position:sticky;left:0;z-index:2;color:var(--t4);background:var(--sunken);
+  border-right:1px solid var(--line);cursor:pointer}
+tbody tr:nth-child(even) td:first-child{background:#161A20}
+tbody tr:hover td:first-child{background:var(--s2)}
+tbody td.sel{background:var(--ac-wash)!important;color:#F2E3C6}
+tbody td.sel-first{box-shadow:inset 2px 0 0 var(--ac)}
+tbody td.dim{color:var(--t4)}
+tbody td.num{color:var(--t1)}
+.chip{display:inline-block;min-width:20px;text-align:center;font:700 10px var(--mono);
+  border-radius:3px;padding:2px 5px;letter-spacing:.02em}
+.chip-I{background:var(--ac-wash);color:var(--ac);border:1px solid #6B5227}
+.chip-P{background:#1C2731;color:var(--video);border:1px solid #35506A}
+.chip-B{background:var(--s2);color:var(--t2);border:1px solid var(--line-2)}
+.empty{padding:34px;text-align:center;color:var(--t3);font-size:12px;font-family:"Segoe UI","Microsoft YaHei UI",sans-serif}
+
+/* Status bar */
+.statusbar{display:flex;align-items:center;gap:10px;background:var(--sunken);
+  border-top:1px solid var(--line);padding:8px 20px;font-size:11px;color:var(--t3);margin:0 -20px}
+.statusbar .kbd{font:10px var(--mono);color:var(--t2);background:var(--s1);
+  border:1px solid var(--line-2);border-bottom-width:2px;border-radius:3px;padding:1px 5px;margin:0 2px}
+.statusbar .sp{flex:1}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--ok);display:inline-block;margin-right:6px}
+.status-count{font:11px var(--mono);color:var(--t2)}
+
+/* Toast */
+.toast{position:fixed;left:50%;bottom:32px;transform:translate(-50%,12px);background:#2C333D;
+  color:var(--t1);border:1px solid var(--line-3);border-radius:7px;padding:10px 16px;font-size:12px;
+  box-shadow:0 10px 30px rgba(0,0,0,.35);opacity:0;pointer-events:none;transition:opacity .18s,transform .18s;z-index:50}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+
+/* ==========================================================================
+   SPEC VIEW
+   ========================================================================== */
+.spec{background:#FBFAF8;border:1px solid var(--paper-line);border-radius:10px;padding:26px 28px;color:var(--ink)}
+.spec h2{font-size:14px;margin:0 0 4px;font-weight:650}
+.spec .lead{font-size:12px;color:var(--ink-2);margin:0 0 18px;line-height:1.65}
+.spec-block{margin-bottom:26px}
+.spec-block:last-child{margin-bottom:0}
+.spec-block h3{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--amber-dark);
+  margin:0 0 12px;font-weight:700;padding-bottom:8px;border-bottom:1px solid var(--paper-line)}
+.swatches{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px}
+.sw{background:#fff;border:1px solid var(--paper-line);border-radius:7px;overflow:hidden}
+.sw .fill{height:46px;display:flex;align-items:flex-end;padding:7px 9px;font:10px "Cascadia Mono",Consolas,monospace;color:#E8EAED}
+.sw .fill.light{color:#23262B}
+.sw .meta{padding:8px 9px}
+.sw .n{font-size:11px;font-weight:650;color:var(--ink)}
+.sw .h{font:10px "Cascadia Mono",Consolas,monospace;color:var(--ink-2);margin-top:3px}
+.sw .r{font-size:10px;color:var(--ink-3);margin-top:4px}
+.type-row{display:flex;align-items:baseline;gap:16px;padding:9px 0;border-bottom:1px dotted var(--paper-line);flex-wrap:wrap}
+.type-row:last-child{border:0}
+.type-row .tl{font-size:10px;color:var(--ink-3);width:150px;flex:none;font-family:"Cascadia Mono",Consolas,monospace}
+.space-row{display:flex;align-items:center;gap:10px;margin-bottom:7px}
+.space-row .bar{height:12px;background:var(--amber-dark);border-radius:2px;opacity:.85}
+.space-row .lb{font:10px "Cascadia Mono",Consolas,monospace;color:var(--ink-2);width:56px}
+.space-row .vl{font-size:11px;color:var(--ink)}
+.state-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px}
+.state-box{background:#fff;border:1px solid var(--paper-line);border-radius:7px;padding:12px}
+.state-box .cap{font-size:10px;color:var(--ink-3);margin-bottom:9px}
+.princ{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+.princ div{background:#fff;border:1px solid var(--paper-line);border-left:3px solid var(--amber-dark);
+  border-radius:6px;padding:12px 13px;font-size:11px;line-height:1.65;color:var(--ink-2)}
+.princ b{display:block;color:var(--ink);font-size:12px;margin-bottom:5px}
+.layout-map{background:#14171B;border-radius:7px;padding:14px;color:#A9B2BE;
+  font:11px/1.9 "Cascadia Mono",Consolas,monospace;white-space:pre;overflow-x:auto}
+.layout-map .hi{color:#E0A44A}
+.hidden{display:none!important}
+
+@media(max-width:900px){
+  .metrics{grid-template-columns:repeat(3,1fr)}
+  .metric:nth-child(3){border-right:0}
+  .metric:nth-child(n+4){border-top:1px solid #2A3038;padding-top:12px;margin-top:12px}
+  .streams{grid-template-columns:1fr}
+  .search{width:120px}
+}
+</style>
+</head>
+<body>
+<div class="canvas">
+  <div class="canvas-head">
+    <div>
+      <div class="kicker">PRISM / Design System v1.0</div>
+      <h1>媒体分析器 · 界面重设计稿</h1>
+      <div class="sub">精密仪器方向 · 深色主题 · 面向 Qt Widgets 的 1:1 视觉对照稿（此页仅用于确认设计，不是要替换你的桌面应用）</div>
+    </div>
+    <div class="view-switch" role="tablist" aria-label="视图切换">
+      <button id="btnApp" role="tab" aria-selected="true">界面预览</button>
+      <button id="btnSpec" role="tab" aria-selected="false">设计规范</button>
+    </div>
+  </div>
+
+  <div class="stage">
+    <!-- ==================== APP VIEW ==================== -->
+    <div class="app" id="appView">
+      <div class="appbar">
+        <div class="brand">
+          <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+            <path d="M1 9h3l2-5 3 10 2.5-7 1.5 2H17" fill="none" stroke="#E0A44A" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="brand-name">媒体分析器</span>
+          <span class="brand-en">MEDIA ANALYSE</span>
+        </div>
+        <span class="appbar-rule"></span>
+        <span class="appbar-tag" id="appbarStatus">本地文件 · 离线解析</span>
+        <span class="appbar-sp"></span>
+        <button class="btn btn-ghost" style="height:28px" id="btnConfig">配置</button>
+        <div class="win-dots" aria-hidden="true"><span>—</span><span>□</span><span>×</span></div>
+      </div>
+
+      <div class="body">
+        <!-- SOURCE -->
+        <section class="sec">
+          <div class="sec-head"><span class="sec-label">Source / 输入源</span><span class="sec-line"></span>
+            <div class="src-mode"><div class="segmented" role="tablist" aria-label="输入源切换">
+              <button id="modeFile" role="tab" aria-selected="true"><span class="seg-dot"></span>本地文件</button>
+              <button id="modeStream" role="tab" aria-selected="false"><span class="seg-dot"></span>网络流</button>
+            </div></div>
+          </div>
+          <div class="source">
+            <!-- ---------- LOCAL FILE ---------- -->
+            <div class="src-panel on" id="panelFile">
+              <label class="field-label" for="pathInput">文件路径</label>
+              <div class="path-row">
+                <div class="path">
+                  <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.5 3.5h4l1.2 1.4h5.8v6.6H1.5z" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/></svg>
+                  <input id="pathInput" value="D:/BaiduNetdiskDownload/e1_1080p_timecode.mp4" spellcheck="false">
+                  <span class="ext">MP4</span>
+                </div>
+                <button class="btn btn-secondary" id="btnBrowse">浏览…</button>
+                <button class="btn btn-primary" id="btnOpen">
+                  <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M1 6.5h7M5.5 3.5l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  打开
+                </button>
+              </div>
+              <div class="source-foot">
+                <span class="hint">点击「打开」选择文件，或直接粘贴路径后按回车</span>
+                <button class="toggle" id="btnDecode" aria-pressed="true"><span class="box">✓</span>解码并解析</button>
+              </div>
+              <div class="live-status">
+                <span class="live-badge file"><span class="pulse"></span>FILE</span>
+                <span class="live-stat">● 已解析 · <b>2 条流</b></span>
+                <span class="live-stat">容器 <b>MOV / MP4</b></span>
+                <span class="live-stat">索引 <b>完整</b></span>
+                <span class="sp"></span>
+                <span class="live-stat" style="color:var(--t4)">离线文件 · 可随机访问任意时间点</span>
+              </div>
+            </div>
+
+            <!-- ---------- NETWORK STREAM ---------- -->
+            <div class="src-panel" id="panelStream">
+              <label class="field-label" for="streamUrl">流地址 · 协议自动识别</label>
+              <div class="path-row">
+                <div class="path" id="urlField">
+                  <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="5.2" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M1.8 7h10.4M7 1.8c1.6 1.5 1.6 8.9 0 10.4M7 1.8c-1.6 1.5-1.6 8.9 0 10.4" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+                  <input id="streamUrl" value="rtsp://192.168.1.64:554/Streaming/Channels/101" spellcheck="false" placeholder="粘贴 rtsp:// · rtmp:// · .m3u8 · .flv 地址">
+                </div>
+                <span class="proto-tag" id="protoExt">RTSP</span>
+                <button class="btn btn-primary" id="btnParse">
+                  <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M1 6.5h7M5.5 3.5l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  解析
+                </button>
+              </div>
+              <div class="source-foot">
+                <span class="hint" id="urlHint">支持 <b>rtsp://</b> · <b>rtmp://</b> · <b>.m3u8</b> · <b>.flv</b>，粘贴地址后按回车即开始帧解析；协议由地址自动判定，无需配置。</span>
+              </div>
+              <div class="live-status">
+                <span class="live-badge"><span class="pulse"></span>LIVE</span>
+                <span class="live-stat">自动识别 <b id="liveProto">RTSP</b></span>
+                <span class="live-stat">已解析帧 <b>18,432</b></span>
+                <span class="live-stat">关键帧 <b>612</b></span>
+                <span class="live-stat">帧率 <b>30.0 fps</b></span>
+                <span class="sp"></span>
+                <button class="btn btn-ghost" style="height:26px;font-size:11px" id="btnStop">停止解析</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- OVERVIEW -->
+        <section class="sec">
+          <div class="sec-head"><span class="sec-label">Overview / 概览</span><span class="sec-line"></span>
+            <span class="sec-hint" id="overviewStatus" style="color:#86B49A"><span class="dot"></span>解析完成 · 43,841 packets in 6.95 s</span></div>
+          <div class="metrics" id="metrics">
+            <div class="metric"><div class="m-label">时长</div><div class="m-value">600.003<span class="u">s</span></div><div class="m-note">10:00.003</div></div>
+            <div class="metric"><div class="m-label">平均码率</div><div class="m-value">9.75<span class="u">Mb/s</span></div><div class="m-note">9,748,792 bit/s</div></div>
+            <div class="metric"><div class="m-label">包总数</div><div class="m-value">43,841</div><div class="m-note">video · audio</div></div>
+            <div class="metric accent"><div class="m-label">解析耗时</div><div class="m-value">6.95<span class="u">s</span></div><div class="m-note">6,307 pkt/s</div></div>
+            <div class="metric"><div class="m-label">容器格式</div><div class="m-value" style="font-size:14px;padding-top:5px">MOV / MP4</div><div class="m-note">m4a · 3gp · 3g2 · mj2</div></div>
+          </div>
+        </section>
+
+        <!-- NOTICE -->
+        <div class="notice" id="notice">
+          <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.6 15 14H1z" fill="none" stroke="#E0A44A" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6v3.6M8 11.6v.1" stroke="#E0A44A" stroke-width="1.5" stroke-linecap="round"/></svg>
+          <span class="ntxt"><b>解码上限</b> · 仅前 3000 帧为帧级数据，之后的行按包级显示（maxDecodeFrames）</span>
+          <button class="nlink" id="btnNoticeMore">详情</button>
+          <button class="nclose" id="btnNoticeClose" aria-label="关闭提示">×</button>
+        </div>
+
+        <!-- STREAMS -->
+        <section class="sec">
+          <div class="sec-head"><span class="sec-label">Streams / 流信息</span><span class="sec-line"></span><span class="sec-hint">2 条流</span></div>
+          <div class="streams">
+            <div class="card video">
+              <div class="card-head"><span class="card-id">#0</span><span class="card-title">视频流</span><span class="card-codec">H.264</span></div>
+              <dl class="kv">
+                <dt>分辨率</dt><dd><strong>1920×1080</strong></dd>
+                <dt>像素格式</dt><dd>yuv420p</dd>
+                <dt>帧率</dt><dd>30.000 fps</dd>
+                <dt>时基</dt><dd>1/15360</dd>
+              </dl>
+            </div>
+            <div class="card audio">
+              <div class="card-head"><span class="card-id">#1</span><span class="card-title">音频流</span><span class="card-codec">AAC</span></div>
+              <dl class="kv">
+                <dt>声道</dt><dd><strong>2 ch</strong></dd>
+                <dt>采样率</dt><dd>44,100 Hz</dd>
+                <dt>采样格式</dt><dd>fltp · LC</dd>
+                <dt>时基</dt><dd>1/44100</dd>
+              </dl>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- DATA TOOLBAR -->
+      <div class="toolbar">
+        <div class="tabs" role="tablist" aria-label="数据包视图">
+          <button class="tab" role="tab" aria-selected="true" data-stream="video">视频 <span class="cnt">43,841</span></button>
+          <button class="tab" role="tab" aria-selected="false" data-stream="audio">音频 <span class="cnt">25,806</span></button>
+        </div>
+        <span class="live-badge hidden" id="toolbarLive" style="margin-left:4px"><span class="pulse"></span>LIVE</span>
+        <span class="toolbar-sp"></span>
+        <div class="search">
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><circle cx="5" cy="5" r="3.4" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="m7.7 7.7 3 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+          <input id="filterInput" placeholder="过滤 pkt# / type…" spellcheck="false">
+        </div>
+        <span class="tb-div"></span>
+        <button class="btn btn-secondary copy-btn" id="btnCopy" disabled>
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="3.2" y="3.2" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M8.8 2H2.2v6.6" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+          复制选区
+        </button>
+      </div>
+
+      <div class="table-wrap" id="tableWrap">
+        <table id="dataTable">
+          <thead><tr id="headRow"></tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="statusbar">
+        <span>拖选矩形选区</span><span>·</span>
+        <span>点 <span class="kbd">#</span> 列选整行</span><span>·</span>
+        <span><span class="kbd">Shift</span> 连选</span><span>·</span>
+        <span><span class="kbd">Ctrl</span>+<span class="kbd">C</span> 导出 TSV</span>
+        <span class="sp"></span>
+        <span id="selInfo" class="status-count">未选择</span><span>·</span>
+        <span class="status-count" id="rowCount">— 行</span>
+        <span id="statusState"><span class="dot"></span>就绪</span>
+      </div>
+    </div>
+
+    <!-- ==================== SPEC VIEW ==================== -->
+    <div class="spec hidden" id="specView">
+      <h2>PRISM · 设计系统规范</h2>
+      <p class="lead">目标：把「所有信息都同样重要」的灰黑平面，改造成有明确阅读顺序的精密仪器。所有数值均为逻辑像素，Qt 高 DPI 下自动缩放。对比度按 WCAG 2.1 AA 校验。</p>
+
+      <div class="spec-block">
+        <h3>01 / 色彩令牌</h3>
+        <div class="swatches" id="swatches"></div>
+      </div>
+
+      <div class="spec-block">
+        <h3>02 / 字体与层级</h3>
+        <div id="typeRows"></div>
+      </div>
+
+      <div class="spec-block">
+        <h3>03 / 间距与尺寸（4pt 基准）</h3>
+        <div id="spaceRows"></div>
+      </div>
+
+      <div class="spec-block">
+        <h3>04 / 控件状态</h3>
+        <div class="state-grid">
+          <div class="state-box"><div class="cap">按钮 · 主操作（唯一）</div><span style="display:inline-block;background:#E0A44A;color:#1A1509;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:700">打开</span></div>
+          <div class="state-box"><div class="cap">按钮 · 次要</div><span style="display:inline-block;background:#232830;color:#E8EAED;border:1px solid #363E49;border-radius:6px;padding:7px 14px;font-size:12px">浏览…</span></div>
+          <div class="state-box"><div class="cap">按钮 · 禁用</div><span style="display:inline-block;background:#1B1F25;color:#5B6572;border:1px solid #2A3038;border-radius:6px;padding:7px 14px;font-size:12px">复制选区</span></div>
+          <div class="state-box"><div class="cap">开关 · 已选中</div><span style="display:inline-block;background:#33291B;color:#E0A44A;border:1px solid #6B5227;border-radius:6px;padding:7px 12px;font-size:11px;font-weight:600">✓ 解码并解析</span></div>
+          <div class="state-box"><div class="cap">输入框 · 聚焦</div><span style="display:inline-block;background:#14171B;color:#E8EAED;border:1px solid #E0A44A;border-radius:6px;padding:7px 11px;font:12px Consolas,monospace">D:/…/e1.mp4</span></div>
+          <div class="state-box"><div class="cap">帧类型 · 不单靠颜色</div>
+            <span style="display:inline-block;background:#33291B;color:#E0A44A;border:1px solid #6B5227;border-radius:3px;padding:2px 6px;font:700 10px Consolas,monospace">I</span>
+            <span style="display:inline-block;background:#1C2731;color:#82A9CC;border:1px solid #35506A;border-radius:3px;padding:2px 6px;font:700 10px Consolas,monospace">P</span>
+            <span style="display:inline-block;background:#232830;color:#A9B2BE;border:1px solid #363E49;border-radius:3px;padding:2px 6px;font:700 10px Consolas,monospace">B</span>
+          </div>
+          <div class="state-box"><div class="cap">输入源 · 分段切换</div>
+            <span style="display:inline-flex;background:#101317;border:1px solid #363E49;border-radius:7px;padding:2px">
+              <span style="background:#2C333D;color:#E8EAED;border-radius:5px;padding:5px 12px;font-size:11px;font-weight:600">本地文件</span>
+              <span style="color:#7E8998;padding:5px 12px;font-size:11px">网络流</span>
+            </span>
+          </div>
+          <div class="state-box"><div class="cap">协议 · 自动识别 / 未识别</div>
+            <span style="display:inline-block;background:#1C2731;color:#82A9CC;border:1px solid #35506A;border-radius:5px;padding:6px 10px;font:600 10px Consolas,monospace">AUTO · RTSP</span>
+            <span style="display:inline-block;background:#2B1D1C;color:#D97B72;border:1px solid #A05B50;border-radius:5px;padding:6px 10px;font:600 10px Consolas,monospace;margin-left:5px">未识别</span>
+          </div>
+          <div class="state-box"><div class="cap">实时状态 · LIVE 徽标</div>
+            <span style="display:inline-block;background:#33291B;color:#E0A44A;border:1px solid #6B5227;border-radius:4px;padding:4px 8px;font:700 10px Consolas,monospace">● LIVE</span>
+            <span style="font-size:10px;color:#5E6672;margin-left:5px">+ 文字，不靠闪烁</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="spec-block">
+        <h3>05 / 布局重构（从上到下的阅读顺序）</h3>
+        <div class="layout-map"><span class="hi">01</span>  APP BAR     品牌 + 全局配置          → 给界面一个明确的“头”
+<span class="hi">02</span>  SOURCE      本地文件 / 一个流地址         → 协议自动识别 · 唯一主按钮
+<span class="hi">03</span>  OVERVIEW    5 个等宽指标              → 散落状态文字结构化
+<span class="hi">04</span>  NOTICE      可关闭的琥珀提示条         → 警告不再是一行裸黄字
+<span class="hi">05</span>  STREAMS     流卡片 + 属性网格          → 标签/数值对齐
+<span class="hi">06</span>  TOOLBAR     Tab + 过滤 + 复制选区      → 操作与数据就近
+<span class="hi">07</span>  DATAVIEW    吸顶表头 / 斑马纹 / 色标   → 扫读效率
+<span class="hi">08</span>  STATUS      帮助文字移到状态栏         → 渐进披露，释放表格上方空间</div>
+      </div>
+
+      <div class="spec-block">
+        <h3>06 / 设计原则</h3>
+        <div class="princ">
+          <div><b>输入只问一次</b>「本地文件 / 网络流」分段切换常驻 Source 区；网络流只要求一个地址，协议由前缀与扩展名自动判定，识别结果是只读徽标而非控件。不提供传输、缓冲、认证、超时、重连或窗口行数设置——这些参数与「看帧」这件事无关。切到实时流后，时长变 LIVE、指标换成帧数/关键帧、主按钮变「解析」、提示条与状态栏同步切换语义。</div>
+          <div><b>一个主色，且只在关键处</b>黄铜琥珀占视觉权重约 10%：主按钮、激活 Tab、I 帧、焦点、警告。其余全部退到暖调石墨中性色。</div>
+          <div><b>层级靠分区，不靠卡片堆叠</b>用表面明度差 + 1px 细分隔线建立 4 级深度（底 / 下沉 / 面板 / 抬升），避免「万物皆卡片」。</div>
+          <div><b>数字是主角</b>所有表格数值等宽、右对齐、tabular-nums；指标数值 20px；表头用 UI 字体以区分「标签」与「数据」。</div>
+          <div><b>不单靠颜色传达信息</b>帧类型同时有字母 + 边框 + 底色；流类型同时有文字 + 顶边色 + 编号色；状态同时有圆点 + 文案。</div>
+          <div><b>渐进披露</b>长篇操作说明从表格上方移入底部状态栏；警告条可关闭；帮助按需展开。</div>
+          <div><b>AA 可访问性</b>正文对比度 ≥ 4.5:1，组件边框 ≥ 3:1；焦点态在所有可交互控件上可见；无闪烁与无限动画。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="canvas-foot">交互提示：切换「视频 / 音频」标签、在表格上拖出矩形选区、试一下过滤框和「复制选区」。设计规范页含完整色板与对比度数据。</div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  "use strict";
+
+  let currentMode='file';   // 'file' | 'stream' — drives the whole header region
+
+  /* ---------- view switch ---------- */
+  const appView=document.getElementById('appView'), specView=document.getElementById('specView');
+  const btnApp=document.getElementById('btnApp'), btnSpec=document.getElementById('btnSpec');
+  function showView(which){
+    const app=which==='app';
+    appView.classList.toggle('hidden',!app); specView.classList.toggle('hidden',app);
+    btnApp.setAttribute('aria-selected',String(app)); btnSpec.setAttribute('aria-selected',String(!app));
+  }
+  btnApp.addEventListener('click',()=>showView('app'));
+  btnSpec.addEventListener('click',()=>showView('spec'));
+
+  /* ---------- toast ---------- */
+  const toast=document.getElementById('toast'); let toastTimer=null;
+  function notify(msg){
+    toast.textContent=msg; toast.classList.add('show');
+    clearTimeout(toastTimer); toastTimer=setTimeout(()=>toast.classList.remove('show'),2200);
+  }
+
+  /* ---------- data ---------- */
+  const VIDEO_COLS=['#','pkt#','stream','dts','dts-time','dts-delta','pts','pts-time','duration','size','type','samples'];
+  const AUDIO_COLS=['#','pkt#','stream','dts','dts-time','dts-delta','pts','pts-time','duration','size','type','samples'];
+  const seed=[
+    [1,2,0,0,'0.000','-',0,'0.000',512,4124,'I','-'],
+    [2,5,0,512,'0.033','0.033',512,'0.033',512,340,'P','-'],
+    [3,7,0,1024,'0.067','0.033',1024,'0.067',512,291,'P','-'],
+    [4,10,0,1536,'0.100','0.033',1536,'0.100',512,263,'P','-'],
+    [5,12,0,2048,'0.133','0.033',2048,'0.133',512,267,'P','-'],
+    [6,15,0,2560,'0.167','0.033',2560,'0.167',512,260,'P','-'],
+    [7,17,0,3072,'0.200','0.033',3072,'0.200',512,236,'P','-'],
+    [8,20,0,3584,'0.233','0.033',3584,'0.233',512,229,'P','-'],
+    [9,22,0,4096,'0.267','0.033',4096,'0.267',512,290,'P','-'],
+    [10,24,0,4608,'0.300','0.033',4608,'0.300',512,271,'P','-'],
+    [11,27,0,5120,'0.333','0.033',5120,'0.333',512,385,'P','-'],
+    [12,29,0,5632,'0.367','0.033',5632,'0.367',512,187,'P','-'],
+    [13,32,0,6144,'0.400','0.033',6144,'0.400',512,296,'P','-'],
+    [14,34,0,6656,'0.433','0.033',6656,'0.433',512,282,'P','-'],
+    [15,37,0,7168,'0.467','0.033',7168,'0.467',512,263,'P','-']
+  ];
+  function makeRows(kind,count){
+    const rows=[];
+    for(let i=0;i<count;i++){
+      if(i<seed.length && kind==='video'){ rows.push(seed[i].slice()); continue; }
+      const n=i+1, pkt=kind==='video'? 2+n*2+Math.floor(n/7) : 1+n*3;
+      const dur=kind==='video'?512:1024;
+      const dts=i*dur, dt=(dts/(kind==='video'?15360:44100)).toFixed(3);
+      const delta=(dur/(kind==='video'?15360:44100)).toFixed(3);
+      const type=(kind==='video') ? (i%30===0?'I':(i%7===0?'B':'P')) : '-';
+      const size=kind==='video'? 180+((i*137)%260) : 320+((i*53)%140);
+      const samples=kind==='audio'? 1024 : '-';
+      rows.push([n,pkt,kind==='video'?0:1,dts,dt,i===0?'-':delta,dts,dt,dur,size,type,samples]);
+    }
+    return rows;
+  }
+  const DATA={video:makeRows('video',48),audio:makeRows('audio',48)};
+  let stream='video', filter='', anchor=null, focus=null, dragging=false, wholeRows=new Set();
+
+  const headRow=document.getElementById('headRow'), tbody=document.getElementById('tbody');
+  const btnCopy=document.getElementById('btnCopy'), selInfo=document.getElementById('selInfo');
+  const rowCount=document.getElementById('rowCount');
+
+  function visibleRows(){
+    if(!filter) return DATA[stream];
+    const q=filter.toLowerCase();
+    return DATA[stream].filter(r=>r.join(' ').toLowerCase().indexOf(q)>=0);
+  }
+  function renderHead(){
+    headRow.innerHTML='';
+    VIDEO_COLS.forEach(c=>{const th=document.createElement('th');th.textContent=c;headRow.appendChild(th);});
+  }
+  function esc(s){return String(s).replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));}
+  function render(){
+    const rows=visibleRows();
+    let html='';
+    rows.forEach((r,ri)=>{
+      html+='<tr data-r="'+ri+'">';
+      r.forEach((v,ci)=>{
+        const cls=[];
+        if(ci===0) cls.push('dim'); else if(typeof v==='number'||/^[\d.]+$/.test(String(v))) cls.push('num');
+        if(v==='-'||v==='–') cls.push('dim');
+        let cell=esc(v);
+        if(ci===10 && (v==='I'||v==='P'||v==='B')) cell='<span class="chip chip-'+v+'">'+v+'</span>';
+        html+='<td data-r="'+ri+'" data-c="'+ci+'" class="'+cls.join(' ')+'">'+cell+'</td>';
+      });
+      html+='</tr>';
+    });
+    tbody.innerHTML=html||'<tr><td class="empty" colspan="12">没有匹配的包 · 清除过滤条件后重试</td></tr>';
+    rowCount.textContent=rows.length+' 行（示例） · 12 列';
+    paintSelection();
+  }
+  function inRect(r,c){
+    if(!anchor||!focus) return false;
+    const r0=Math.min(anchor[0],focus[0]),r1=Math.max(anchor[0],focus[0]);
+    const c0=Math.min(anchor[1],focus[1]),c1=Math.max(anchor[1],focus[1]);
+    return r>=r0&&r<=r1&&c>=c0&&c<=c1;
+  }
+  function paintSelection(){
+    const cells=tbody.querySelectorAll('td[data-c]');
+    let n=0;
+    cells.forEach(td=>{
+      const r=+td.dataset.r,c=+td.dataset.c;
+      const picked=wholeRows.has(r)||inRect(r,c);
+      td.classList.toggle('sel',picked);
+      td.classList.toggle('sel-first',picked&&c===0);
+      if(picked) n++;
+    });
+    const rc=wholeRows.size|| (anchor&&focus? Math.abs(anchor[0]-focus[0])+1 : 0);
+    const cc=anchor&&focus? Math.abs(anchor[1]-focus[1])+1 : (wholeRows.size?12:0);
+    selInfo.textContent=n? (rc+' 行 × '+cc+' 列 已选') : '未选择';
+    btnCopy.disabled=!n;
+  }
+  function selectedCells(){
+    const rows=visibleRows(), out=[];
+    const picked=new Set();
+    tbody.querySelectorAll('td.sel').forEach(td=>picked.add(td.dataset.r+':'+td.dataset.c));
+    const byRow={};
+    picked.forEach(k=>{const [r,c]=k.split(':').map(Number);(byRow[r]=byRow[r]||[]).push(c);});
+    Object.keys(byRow).sort((a,b)=>a-b).forEach(r=>{
+      const cols=byRow[r].sort((a,b)=>a-b);
+      out.push(cols.map(c=>rows[r][c]).join('\t'));
+    });
+    return out.join('\n');
+  }
+
+  /* ---------- table interactions ---------- */
+  tbody.addEventListener('mousedown',e=>{
+    const td=e.target.closest('td[data-c]'); if(!td) return;
+    e.preventDefault();
+    const r=+td.dataset.r,c=+td.dataset.c;
+    if(e.shiftKey&&anchor){ focus=[r,c]; dragging=false; paintSelection(); return; }
+    wholeRows.clear();
+    anchor=[r,c]; focus=[r,c]; dragging=true;
+    if(c===0){ wholeRows.add(r); anchor=null; focus=null; dragging=false; }
+    paintSelection();
+  });
+  tbody.addEventListener('mouseover',e=>{
+    if(!dragging) return;
+    const td=e.target.closest('td[data-c]'); if(!td) return;
+    focus=[+td.dataset.r,+td.dataset.c]; paintSelection();
+  });
+  window.addEventListener('mouseup',()=>{dragging=false;});
+  document.addEventListener('keydown',e=>{
+    if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='c'&&!btnCopy.disabled&&e.target.tagName!=='INPUT'){ e.preventDefault(); copySelection(); }
+  });
+  function copySelection(){
+    const tsv=selectedCells();
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(tsv).then(()=>notify('已复制 '+tsv.split('\n').length+' 行 TSV 到剪贴板')).catch(()=>notify('已生成 TSV（'+tsv.split('\n').length+' 行）'));
+    } else { notify('已生成 TSV（'+tsv.split('\n').length+' 行）'); }
+  }
+  btnCopy.addEventListener('click',copySelection);
+
+  /* ---------- tabs / filter / controls ---------- */
+  document.querySelectorAll('.tab').forEach(tab=>{
+    tab.addEventListener('click',()=>{
+      document.querySelectorAll('.tab').forEach(t=>t.setAttribute('aria-selected','false'));
+      tab.setAttribute('aria-selected','true');
+      stream=tab.dataset.stream; anchor=null; focus=null; wholeRows.clear();
+      render();
+    });
+  });
+  document.getElementById('filterInput').addEventListener('input',e=>{
+    filter=e.target.value.trim(); anchor=null; focus=null; wholeRows.clear(); render();
+  });
+  document.getElementById('btnDecode').addEventListener('click',function(){
+    const on=this.getAttribute('aria-pressed')==='true';
+    this.setAttribute('aria-pressed',String(!on));
+    this.querySelector('.box').textContent=on?'':'✓';
+    notify(on?'已关闭解码并解析':'已开启解码并解析');
+  });
+  document.getElementById('btnOpen').addEventListener('click',()=>notify('已重新解析 · 43,841 packets in 6.95 s'));
+  document.getElementById('btnBrowse').addEventListener('click',()=>notify('打开文件对话框（演示）'));
+  document.getElementById('btnConfig').addEventListener('click',()=>notify('打开配置（演示）'));
+  document.getElementById('btnNoticeClose').addEventListener('click',()=>document.getElementById('notice').classList.add('hidden'));
+  document.getElementById('btnNoticeMore').addEventListener('click',()=>notify(
+    currentMode==='stream'
+      ? '识别规则：rtsp(s):// → RTSP · rtmp*:// → RTMP · .m3u8 → HLS · .flv → HTTP-FLV'
+      : 'maxDecodeFrames = 3000，之后仅解析包级信息'));
+  document.getElementById('pathInput').addEventListener('keydown',e=>{
+    if(e.key==='Enter') notify('已解析：'+e.target.value.split('/').pop());
+  });
+
+  /* ---------- spec view content ---------- */
+  const SWATCHES=[
+    ['bg / base','#14171B','主窗口底色 · 非纯黑',false],
+    ['bg / sunken','#101317','表格、输入框（下沉）',false],
+    ['surface 1','#1B1F25','面板、卡片、表头',false],
+    ['surface 2','#232830','hover、次要按钮',false],
+    ['surface 3','#2C333D','抬升、菜单、tooltip',false],
+    ['text / primary','#E8EAED','主文字',false],
+    ['text / secondary','#A9B2BE','次要文字',false],
+    ['text / muted','#7E8998','标签、占位符 4.6:1',false],
+    ['accent','#E0A44A','黄铜信号色 · 约 10% 面积',true],
+    ['accent / wash','#33291B','选中态、开关底色',true],
+    ['signal / video','#82A9CC','视频流、P 帧',false],
+    ['signal / audio','#C99A72','音频流',false],
+    ['success','#86B49A','解析完成',false],
+    ['error','#D97B72','解析失败',false]
+  ];
+  function isLight(hex){
+    const n=parseInt(hex.slice(1),16), r=(n>>16)&255, g=(n>>8)&255, b=n&255;
+    return (0.299*r+0.587*g+0.114*b)>140;
+  }
+  document.getElementById('swatches').innerHTML=SWATCHES.map(s=>{
+    const ink=isLight(s[1])?'#23262B':'#E8EAED';
+    return '<div class="sw"><div class="fill" style="background:'+s[1]+';color:'+ink+'">'+s[1]+'</div>'+
+    '<div class="meta"><div class="n">'+s[0]+'</div><div class="h">'+s[1]+'</div><div class="r">'+s[2]+'</div></div></div>';
+  }).join('');
+
+  const TYPES=[
+    ['metric-value / 20px mono','<span style="font:500 20px Cascadia Mono,Consolas,monospace;color:#23262B">600.003</span>','概览关键数值'],
+    ['title / 15px semibold','<span style="font:650 15px Segoe UI,Microsoft YaHei UI,sans-serif">媒体分析器</span>','应用名、区块标题'],
+    ['body / 13px','<span style="font:13px Segoe UI,Microsoft YaHei UI,sans-serif">点击「打开」选择文件</span>','正文、按钮'],
+    ['meta / 12px mono','<span style="font:12px Cascadia Mono,Consolas,monospace;color:#5E6672">1920 × 1080 · yuv420p</span>','流属性、表格数据'],
+    ['label / 11px semibold','<span style="font:600 11px Segoe UI,Microsoft YaHei UI,sans-serif">文件路径</span>','字段标签、表头'],
+    ['eyebrow / 10px 600','<span style="font:700 10px Segoe UI,sans-serif;letter-spacing:.14em;color:#8A9099">OVERVIEW / 概览</span>','分区标识']
+  ];
+  document.getElementById('typeRows').innerHTML=TYPES.map(t=>
+    '<div class="type-row"><span class="tl">'+t[0]+'</span>'+t[1]+'<span style="font-size:11px;color:#8A9099;margin-left:auto">'+t[2]+'</span></div>').join('');
+
+  const SPACES=[[4,'控件内最小间隙'],[8,'同级控件 gap'],[12,'卡片内边距'],[16,'区块内边距 / 按钮水平内边距'],[20,'窗口左右边距 / 区块间距'],[24,'分组间距'],[32,'控件高度 / 大组间距'],[48,'顶层栏高度']];
+  document.getElementById('spaceRows').innerHTML=SPACES.map(s=>
+    '<div class="space-row"><span class="lb">'+s[0]+' px</span><span class="bar" style="width:'+(s[0]*3)+'px"></span><span class="vl">'+s[1]+'</span></div>').join('');
+
+  renderHead(); render();
+
+  /* ---------- Input source: local file <-> network stream ----------
+     A live source changes the semantics of the whole header: duration is
+     LIVE, frame counts replace latency, the button says "parse", and the
+     notice explains the auto-detected protocol instead of a window limit. */
+  const METRICS={
+    file:[
+      ['时长','600.003<span class="u">s</span>','10:00.003',false],
+      ['平均码率','9.75<span class="u">Mb/s</span>','9,748,792 bit/s',false],
+      ['包总数','43,841','video · audio',false],
+      ['解析耗时','6.95<span class="u">s</span>','6,307 pkt/s',true],
+      ['容器格式','<span style="font-size:14px">MOV / MP4</span>','m4a · 3gp · 3g2 · mj2',false]
+    ],
+    stream:[
+      ['时长','<span class="live">LIVE</span>','持续流 · 无固定时长',false],
+      ['实时码率','12.4<span class="u">Mb/s</span>','逐包统计',false],
+      ['已解析包数','1,284,306','持续增长',false],
+      ['已解析帧数','18,432<span class="u">帧</span>','含 612 个关键帧',true],
+      ['接入协议','<span style="font-size:14px">RTSP</span>','auto · rtsp:// 前缀',false]
+    ]
+  };
+  function applyMode(mode){
+    const isStream=mode==='stream';
+    currentMode=mode;
+    document.getElementById('panelFile').classList.toggle('on',!isStream);
+    document.getElementById('panelStream').classList.toggle('on',isStream);
+    document.getElementById('modeFile').setAttribute('aria-selected',String(!isStream));
+    document.getElementById('modeStream').setAttribute('aria-selected',String(isStream));
+    document.getElementById('appbarStatus').textContent=
+      isStream?'RTSP 实时流 · 帧解析中':'本地文件 · 离线解析';
+
+    const cells=document.querySelectorAll('#metrics .metric');
+    METRICS[mode].forEach((m,i)=>{
+      cells[i].querySelector('.m-label').textContent=m[0];
+      cells[i].querySelector('.m-value').innerHTML=m[1];
+      cells[i].querySelector('.m-note').textContent=m[2];
+      cells[i].classList.toggle('accent',m[3]);
+    });
+    document.getElementById('overviewStatus').innerHTML=isStream
+      ? '<span class="dot"></span>实时解析 · 30.0 fps · 12.4 Mb/s'
+      : '<span class="dot"></span>解析完成 · 43,841 packets in 6.95 s';
+
+    const n=document.getElementById('notice');
+    n.classList.remove('hidden');
+    n.classList.remove('info');
+    n.querySelector('.ntxt').innerHTML=isStream
+      ? '<b>协议自动识别</b> · 按地址前缀与扩展名判定，无需选择协议或配置连接参数'
+      : '<b>解码上限</b> · 仅前 3000 帧为帧级数据，之后的行按包级显示（maxDecodeFrames）';
+    n.querySelectorAll('svg path').forEach(p=>p.setAttribute('stroke',isStream?'#82A9CC':'#E0A44A'));
+    document.getElementById('btnNoticeMore').textContent=isStream?'识别规则':'详情';
+
+    document.getElementById('toolbarLive').classList.toggle('hidden',!isStream);
+    document.getElementById('statusState').innerHTML=isStream
+      ? '<span class="dot"></span>LIVE · 帧解析中'
+      : '<span class="dot"></span>就绪';
+    if(isStream) syncProto();
+  }
+  document.getElementById('modeFile').addEventListener('click',()=>applyMode('file'));
+  document.getElementById('modeStream').addEventListener('click',()=>applyMode('stream'));
+
+  /* ---------- Protocol auto-detection ----------
+     The URL is the only input. Explicit schemes win first; HTTP-based
+     streams are classified by their playlist/file extension. The readout
+     is a passive label, never a control — the user cannot pick a protocol. */
+  const PROTO_RULES=[
+    [/^rtsp(s)?:\/\//i,'RTSP','rtsp:// 前缀'],
+    [/^rtmp(s|t|e|te|fp)?:\/\//i,'RTMP','rtmp:// 前缀'],
+    [/\.m3u8(\?|#|$)/i,'HLS','.m3u8 播放列表'],
+    [/\.flv(\?|#|$)/i,'HTTP-FLV','.flv 扩展名']
+  ];
+  const UNSUPPORTED='仅支持 rtsp:// · rtmp:// · .m3u8 · .flv';
+  function detectProto(raw){
+    const u=(raw||'').trim();
+    if(!u) return {name:'待输入',rule:'粘贴流地址',ok:false};
+    for(const [re,name,rule] of PROTO_RULES){
+      if(re.test(u)) return {name,rule,ok:true};
+    }
+    return {name:'未识别',rule:UNSUPPORTED,ok:false};
+  }
+  function syncProto(){
+    const raw=document.getElementById('streamUrl').value;
+    const d=detectProto(raw);
+    const tag=document.getElementById('protoExt');
+    tag.textContent=d.name;
+    tag.classList.toggle('unknown',!d.ok);
+    document.getElementById('urlField').classList.toggle('invalid',!d.ok && raw.trim().length>0);
+    document.getElementById('liveProto').textContent=d.name;
+    const hint=document.getElementById('urlHint');
+    hint.classList.toggle('warn',!d.ok);
+    hint.innerHTML=d.ok
+      ? '已识别 <b>'+d.name+'</b> · '+d.rule+'；按回车或点击「解析」开始帧解析'
+      : '<b>'+d.rule+'</b>';
+    document.getElementById('btnParse').disabled=!d.ok;
+
+    document.getElementById('appbarStatus').textContent=
+      d.ok?d.name+' 实时流 · 帧解析中':'地址协议未识别';
+    if(currentMode==='stream'){
+      document.getElementById('statusState').innerHTML=d.ok
+        ? '<span class="dot"></span>LIVE · '+d.name+' 帧解析中'
+        : '<span class="dot"></span>地址协议未识别';
+    }
+    const cell=document.querySelectorAll('#metrics .metric')[4];
+    if(cell){
+      cell.querySelector('.m-value').innerHTML='<span style="font-size:14px">'+d.name+'</span>';
+      cell.querySelector('.m-note').textContent=d.ok?'auto · '+d.rule:'地址无法识别';
+    }
+    const n=document.getElementById('notice');
+    n.classList.toggle('info',d.ok);
+    n.querySelector('.ntxt').innerHTML=d.ok
+      ? '<b>协议自动识别 · '+d.name+'</b> · '+d.rule+'；无需选择协议或配置连接参数，直接开始逐帧解析'
+      : '<b>地址协议未识别</b> · '+UNSUPPORTED;
+    n.querySelectorAll('svg path').forEach(p=>p.setAttribute('stroke',d.ok?'#82A9CC':'#E0A44A'));
+    return d;
+  }
+  function startParse(){
+    const d=syncProto();
+    if(d.ok){
+      document.getElementById('statusState').innerHTML='<span class="dot"></span>LIVE · '+d.name+' 帧解析中';
+      notify('开始解析 · '+d.name+' · '+d.rule);
+    }
+  }
+  document.getElementById('streamUrl').addEventListener('input',syncProto);
+  document.getElementById('streamUrl').addEventListener('keydown',e=>{
+    if(e.key==='Enter') startParse();
+  });
+  document.getElementById('btnParse').addEventListener('click',startParse);
+  document.getElementById('btnStop').addEventListener('click',()=>notify('已停止解析'));
+  // Deep link: open design-preview.html#stream to land on the LIVE state.
+  applyMode(location.hash==='#stream'?'stream':'file');
+  document.documentElement.setAttribute('data-js-ready','1');
+})();
+</script>
+</body>
+</html>

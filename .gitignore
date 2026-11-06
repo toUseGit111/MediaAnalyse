@@ -1,0 +1,14 @@
+# Agent working memory / internal state — never commit
+.workbuddy/
+
+# Transient logs
+*.log
+aqtinstall.log
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Editor / OS cruft
+Thumbs.db
+Desktop.ini
