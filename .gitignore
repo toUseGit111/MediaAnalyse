@@ -1,14 +1,25 @@
-# Agent working memory / internal state — never commit
+# --- 构建产物（可随时删除重建） ---
+build/
+dist/
+.cache/
+compile_commands.json
+*.user
+
+# --- Agent working memory / internal state — never commit ---
 .workbuddy/
 
-# Transient logs
+# --- 运行时产物：崩溃转储 ---
+crashes/
+*.dmp
+
+# --- Transient logs ---
 *.log
 aqtinstall.log
 
-# Python caches
+# --- Python caches ---
 __pycache__/
 *.pyc
 
-# Editor / OS cruft
+# --- Editor / OS cruft ---
 Thumbs.db
 Desktop.ini

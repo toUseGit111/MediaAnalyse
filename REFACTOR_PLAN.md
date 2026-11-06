@@ -247,10 +247,15 @@ build/          CMake ≥ 3.28 + vcpkg（ffmpeg、Qt）+ 预设 presets；CI(Win
 
 **已完成**
 
-- `core/`：`Result`/`Diagnostic`（错误即数据）、`UrlNormalizer`（`file:///C:/` → `file:C:/` 等 7 类修正）、`MediaInfo` 多流 DTO、`Analyzer` 接口。
-- `infra/`：FFmpeg RAII、`av_log` 桥接、`InterruptGuard` 分阶段超时 + 协作取消、`ProbeAnalyzer`（open → find_stream_info → demux，可选解码，帧数有界）。
-- `cli/`：`media-analyse-cli`，支持 `--json/--frames/--decode/--opt`，静态链接单文件。
-- `bridge/` + `app/`：`AnalysisController`（工作线程 + 取消 + 诊断信号）、`FrameTableModel`（10 列 `QAbstractTableModel`）、QML 深色界面（源栏 / 流卡片 / 双 Tab 帧表 / 配置弹窗 / 失败诊断弹窗），支持命令行传参直接分析。
+- `core/`：`Result`/`Diagnostic`（错误即数据）、`UrlNormalizer`（`file:///C:/` → `file:C:/` 等 7 类修正）、`MediaInfo` 多流 DTO、`Analyzer` 接口、`Serialization`（无第三方库的 JSON 序列化契约，CLI/worker/GUI 三方共用 wire format）。
+- `infra/`：FFmpeg RAII、`av_log` 桥接、`InterruptGuard` 分阶段超时 + 协作取消、`ProbeAnalyzer`（open → find_stream_info → demux，可选解码，帧数有界）、`CrashHandler`（SEH `SetUnhandledExceptionFilter` + `MiniDumpWriteDump`，覆盖 invalid_parameter/purecall/terminate，写 `<exedir>/crashes/<app>-<ts>.dmp` 并打印 `[CRASHDUMP]` 行）。
+- `cli/`：`media-analyse-cli`，支持 `--json/--frames/--decode/--opt`，启动时装 `CrashHandler`。
+- `worker/`：`analyzer-worker.exe`——**崩溃隔离的分析内核（无 Qt）**：stdin 读 `analyze` 请求、流式 `progress` + 最终 `result` 到 stdout；静态链接 MinGW 运行时，附 `cancel` 取消通道。
+- `bridge/` + `app/`：`AnalysisController` 改为经 `QProcess` 拉起 `analyzer-worker.exe`，解析其 JSON、看门狗判定崩溃（最多自动重启一次）、`userRequestedStop_` 区分中性取消与真实失败；`FrameTableModel`（多列 `QAbstractTableModel`）、QML 深色界面（源栏 / 流卡片 / 双 Tab 帧表 / 配置弹窗 / 失败诊断弹窗），`app/main.cpp` 装 `CrashHandler`。
+- **P2 健壮性（核心部分）**：进程隔离 + minidump + fuzz 已落地。`tests/ser_test.cpp`（序列化往返）、`tests/controller_test.cpp`（无窗口控制器头测，验证 `controller → QProcess → worker → JSON → fromJson → analysisSucceeded` 全流程）、`tests/fuzz_worker.py`（随机变异 + 截断，1 万次喂 worker 0 未处理崩溃）。
+- **工程结构扁平化 + 打包**：源码从 `media-analyse/` 二级目录上移到仓库根（`git mv` 保留历史），`core/infra/worker/bridge/app/cli/tests/scripts/docs` 平铺；新增 `docs/PROJECT_GUIDE.md`（目录职责 / 编译 / 打包 / 使用）与 `scripts/package.py`（从构建树挑出运行时文件产出干净 `dist/` 包）；`.gitignore` 合并为根级单一文件（`build/ dist/ crashes/ *.log`）。
+- **P2 收尾修复**：worker 发完 `result` 后不再 `join()` 阻塞在 stdin 读线程（否则每次分析泄漏一个 `analyzer-worker.exe`，GUI 端已确认 20 s 仍存活），改为 `std::_Exit(0)`；`tests/gui_integration_test.py` 增加「worker 必须在 10 s 内退出」硬断言。`app/CMakeLists.txt` 的 worker/FFmpeg/MinGW DLL 部署由 `POST_BUILD` 改为 `ALL` 目标 `ma_deploy_runtime`，修掉「只改 worker 时 GUI 目录副本不刷新」的打包隐患。
+- **P3 阶段耗时诊断**：`core::StageTimings`（open / find_stream_info / demux / total，未到达为 -1 → JSON `null`）由 `ProbeAnalyzer` 在成功、取消、失败三条路径统一填充；CLI human 输出 `timings` 行、`--json` 输出 `timings` 对象、GUI「详情」toast 展示 `open/probe/demux` 秒数，失败时也能看出卡在哪个阶段。`ser_test` 增加 timings 往返断言（含 `-1 → null → -1`）。
 
 **冒烟测试结果**
 
@@ -263,4 +268,4 @@ build/          CMake ≥ 3.28 + vcpkg（ffmpeg、Qt）+ 预设 presets；CI(Win
 | 随机垃圾 mp4 | 一句「解析失败」 | ✅ 阶段 `open` + 错误码 `-1094995529` + 原文 |
 | 不存在的路径 | 一句「解析失败」 | ✅ `file-not-found` + 建议 |
 
-**下一步**：worker 进程隔离 + minidump（P2）→ 协议配置中心与诊断面板（P3）→ 样本库与 golden 回归（等实际崩溃样本、不支持地址清单）。
+**下一步**：P2 剩余（样本库 + golden 回归，等实际崩溃样本与「不支持」地址清单）→ P3 剩余（`protocol_whitelist` 白名单、TLS/自签证书/鉴权快捷项）→ P5 发布（变更日志细化、双跑对照报告）。打包链路已具备（`scripts/package.py`），P5 只剩版本号与变更日志的人工作业。
