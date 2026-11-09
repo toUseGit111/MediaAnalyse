@@ -18,7 +18,7 @@ worker/  崩溃隔离的分析内核（无 Qt）：从 stdin 读分析请求、�
 bridge/  Qt 适配层：AnalysisController 通过 QProcess 拉起 worker、解析其 JSON、看门狗自动重启一次、原生文件选择器；FrameTableModel（多列）
 app/     QML 界面 + 程序入口（含 CrashHandler）
 cli/     media-analyse-cli：无界面命令行分析器（回归测试与脚本化排障用，同样装 CrashHandler）
-tests/   单测（ser_test / controller_test）+ Python 冒烟（CLI JSON 回归、GUI 集成、fuzz 变异）+ assets/sample.mp4 + manual/（需推流环境的手工脚本）
+tests/   单测（ser_test / slice_type_test / controller_test）+ Python 冒烟（CLI JSON 回归、帧类型一致性、概览折叠结构与实机交互、GUI 集成、worker 增量快照、无限流 GUI 回归、fuzz 变异）+ assets/sample.mp4 + manual/（需推流环境的手工脚本）
 scripts/ package.py：从构建树挑出运行时文件，产出干净的可分发目录
 docs/    design/（PRISM 设计稿）、screenshots/（成品截图）、verification/（fuzz 报告）、PROJECT_GUIDE.md（工程说明）
 build/   CMake 构建产物（已 gitignore，可随时删除重建）
@@ -60,7 +60,8 @@ media-analyse-cli [--json] [--frames[=N]] [--decode] \
                   [--max-frames N] [--max-decode-frames N] \
                   [--probesize B] [--analyze-duration US] \
                   [--connect-timeout S] [--stall-timeout S] [--probe-timeout S] \
-                  [--opt K=V] <url|file>
+                  [--opt K=V] [--no-align] [--compare <file>] [--anchor-ms N] \
+                  <url|file>
 ```
 
 示例：
@@ -75,14 +76,45 @@ media-analyse-cli --decode --opt rtsp_transport=tcp rtsp://cam/stream
 
 ### JSON 回归检查
 
-`--json` 保证输出可被标准 JSON 解析器读取，包括 `--frames=N` 截断行数、分析失败路径，以及**解码路径的纯附加契约**（行数/时间戳/I-P-B 不因 `--decode` 改变、`--max-decode-frames` 生效、帧级 extras 有值、**超预算时前部行仍保留 extras 且各流都有**）。成功时顶层 `notes` 会带上解码统计 / URL 修正 / 停止提示，便于脚本断言。改动 CLI 后跑一次（纯标准库，自动生成本地 wav / 垃圾文件 / 不存在的路径）：
+`--json` 保证输出可被标准 JSON 解析器读取，包括 `--frames=N` 截断行数、分析失败路径，以及**解码路径的纯附加契约**（行数/时间戳/帧类型不因 `--decode` 改变、`--max-decode-frames` 生效、帧级 extras 有值、**超预算时前部行仍保留 extras 且各流都有**）。成功时顶层 `notes` 会带上解码统计 / URL 修正 / 停止提示，便于脚本断言。改动 CLI 后跑一次（纯标准库，自动生成本地 wav / 垃圾文件 / 不存在的路径）：
 
 ```bash
 python tests/smoke_cli_json.py                     # 7 项：JSON 合法性 + 错误路径 + 解码纯附加
-python tests/smoke_cli_json.py C:/videos/a.mp4     # 再 +7 项：视频 I/P/B、samples、extras、预算上限/前部保留/按流预算/提示语
+python tests/smoke_cli_json.py C:/videos/a.mp4     # 再 +7 项：I/P/B slice 类型、samples、extras、预算上限/前部保留/按流预算/提示语
+python tests/pict_type_test.py                     # 8 项：key=I、非 key 保留 P/B、无启动 I 爆发、每 GOP 一个 I、解码纯附加
+python tests/pict_type_test.py rtsp://host/live     # 也可直接喂录制文件或网络流，复验 GOP 内的 I 帧分布
+python tests/pict_type_test.py some.mp4 --ffprobe  # 可选：与 ffprobe 解码出的 I/P/B 直方图交叉核对
 ```
 
-可用 `MA_CLI` 指定其他 CLI 路径；两个 preset 均跑出 `14/14 checks passed` 即通过。
+`pict_type_test.py` 同时守两个回归：旧的「码流 parser 滞后导致 3 个 I / 每 GOP 2 个 I」，以及修错位时把 `P`/`B` 一起删掉。它断言 `key == true` 必为 `I`、非关键帧仍保留真实 `I/P/B`、GOP 内部不再出现额外 `I`。底层由 `tests/slice_type_test.cpp`（21 项，合成 NAL + 畸形输入扫描）保证。可用 `MA_CLI` 指定其他 CLI 路径；`smoke_cli_json.py` 须 `14/14 checks passed`。
+
+## HLS 录制文件对齐诊断（PDT 可选）
+
+面向「音画不同步 / 多路流或录制文件画面不同步」的排查。核心约定：**`#EXT-X-PROGRAM-DATE-TIME` 是可选锚点，不是前置依赖**。今天的录制清单没有 PDT，后续录制端补上即可，代码只有一条路径、按三档自动选择时间基准：
+
+| `alignment.timeline` | 触发条件 | 文件内诊断 | 跨文件对齐 |
+| --- | --- | --- | --- |
+| `program-date-time` | 清单含 PDT | 全部 + 绝对墙上时钟 | **精确**（PDT 差值，置信度 1.0） |
+| `playlist-elapsed` | 无 PDT、有 `EXTINF` | 全部（ΣEXTINF 相对时间轴） | 只能相对，输出 `timeline-relative` 明示 |
+| `pts-only` | 无清单（单 `.ts` / 不透明 URL） | 流内 + 流间 | 不支持 |
+
+后续清单里只要出现 PDT 标签，**无需改代码、无需开关、无需重编译**：自动升级为绝对时间轴，`frames[].wallClockMs` 与 `alignment.firstWallClockMs` 随之出现；部分分片有 PDT 会给出 `pdt-partial` 警告而不是假装完整。
+
+能查的问题：分片缺失（此前 FFmpeg 静默跳过、结果仍是 `diag=ok`）、未标注 `#EXT-X-DISCONTINUITY` 的时间戳跳变（此前只表现为 1.03 s `dtsDelta`）、`EXTINF` 与实测时长不符、PDT 录制中断、A/V 起始偏移、时钟漂移、pts 回退/空档、分片间 A/V 相位突变。分片归属由 FFmpeg `io_open` 回调实测，**不按 pts 反推**——时间戳本身出错时归属依然准确。
+
+```bash
+media-analyse-cli --json record/index.m3u8                       # JSON 的 alignment 段
+media-analyse-cli record/index.m3u8                              # human 输出对齐摘要
+media-analyse-cli --compare other.m3u8 record/index.m3u8         # 两份录制的时间偏差
+media-analyse-cli --compare other.m3u8 --anchor-ms 1500 record/index.m3u8  # 无 PDT 时人工锚点
+media-analyse-cli --no-align record/index.m3u8                   # 跳过后处理，只要原始包
+```
+
+`--compare` 在 JSON 里输出 `comparison{method,offsetMs,confidence,overlapSeconds,note}`：双方都有 PDT 时 `method=pdt` 且 `offsetMs` 为墙上时钟差；任一方缺 PDT 时降级为 `relative`（置信度 0）并明确提示，或用 `--anchor-ms` 指定一个共同事件（如打板 / 时间码）得到 `manual-anchor`（置信度 0.5）。**不会在没有绝对时钟时编造一个看起来精确的偏移。**
+
+GUI：SUMMARY 折叠分组底部新增 `ALIGNMENT / 对齐诊断` 折叠头，默认只占一行（时间基准 + 错误/警告数，不挤压帧表），点开展示墙上时钟起止、每条流的起始偏移 / 时钟漂移 / 最大空档，以及问题列表。
+
+回归：`python tests/alignment_cli_test.py`（12 项，四种真实清单 + IPC + 三种比较模式；样本缺失时用 ffmpeg 自动再生成）、`ctest` 中的 `alignment_test`（40 项纯算法单测）。
 
 ## 界面（PRISM 设计系统）
 
@@ -98,12 +130,13 @@ Qt Quick Controls 强制使用 **Basic** 风格，避免系统/Material 配色�
 |---|---|
 | 01 APP BAR | 品牌 / 全局状态标签 / 「配置」 |
 | 02 SOURCE | 「本地文件 / 网络流」分段切换；**唯一主按钮**（打开 / 解析）；只读协议徽标 `AUTO · RTSP`；LIVE 状态行与**独立的「停止解析」按钮** |
-| 03 OVERVIEW | 5 个等宽指标：时长 / 平均码率 / 包总数 / 解析耗时 / 容器格式；切到网络流后变为 LIVE / 包数 / 帧数 / 接入协议 |
-| 04 NOTICE | 可关闭的三态提示条（琥珀警告 / 蓝色信息 / 红色错误），「详情」用 toast 显示完整诊断 |
-| 05 STREAMS | 视频（蓝顶边）/ 音频（橙顶边）卡片 + 4 列属性网格 |
-| 06 TOOLBAR | 视频 / 音频 Tab 带行数徽标、过滤框、复制选区 |
-| 07 DATAVIEW | 吸顶表头、斑马纹、I/P/B 色标、矩形选区、每 Tab 13 列（视频/音频各一套） |
-| 08 STATUS | 操作提示渐进披露 + 选区信息 + 行数 + 状态圆点 |
+| 03 SUMMARY | **同一个可折叠分组**：折叠头（收起时显示来源 / 流数 / 包数摘要）统管 OVERVIEW 的 5 个等宽指标（时长 / 平均码率 / 包总数 / 解析耗时 / 容器格式；网络流切换为 LIVE / 包数 / 帧数 / 接入协议）与 STREAMS 的视频（蓝顶边）/ 音频（橙顶边）卡片 |
+| 04 NOTICE | 可关闭的三态提示条（琥珀警告 / 蓝色信息 / 红色错误），「详情」用 toast 显示完整诊断；**位于 SUMMARY 分组内但不受折叠控制，收起时仍常显** |
+| 05 TOOLBAR | 视频 / 音频 Tab 带行数徽标、过滤框、复制选区 |
+| 06 DATAVIEW | 吸顶表头、斑马纹、I/P/B 色标、矩形选区、每 Tab 13 列（视频/音频各一套）；`Layout.fillHeight` 自动占满折叠腾出的高度 |
+| 07 STATUS | 操作提示渐进披露 + 选区信息 + 行数 + 状态圆点 |
+
+**折叠概览**：点击 `SUMMARY / 概览与流信息` 折叠头，或按 `Ctrl+Shift+S`，可一次性收起指标条与流卡片，把约 230–350 px 的高度让给帧表（实测可见帧行由 5 行增至 14 行）。收起后折叠头仍显示「来源 · N 条流 · M 包」摘要，NOTICE 提示条保持可见。窗口高度小于 780 逻辑像素且未手动切换过时会自动折叠；手动点过一次后以用户选择为准。回归见 `tests/summary_fold_test.py`。
 
 **网络流只要求一个地址**：`rtsp(s)://` → RTSP、`rtmp*://` → RTMP、`.m3u8` → HLS、
 `.flv` → HTTP-FLV 由地址自动判定，结果是只读徽标而非控件；未识别时仍可交给 FFmpeg 尝试
@@ -126,9 +159,9 @@ Qt Quick Controls 强制使用 **Basic** 风格，避免系统/Material 配色�
 - **视频 Tab**：`#`（当前 Tab 内帧号）、`pkt#`（文件内全局包序号）、`stream`、`dts`、`dts-time`、`dts-delta`、`pts`、`pts-time`、`duration`、`size`、`type`、`dims`、`format` —— 不含 `samples` / `ch`。
 - **音频 Tab**：`#`、`pkt#`、`stream`、`dts`、`dts-time`、`dts-delta`、`pts`、`pts-time`、`duration`、`size`、`samples`、`format`、`ch` —— 不含 `type` / `dims`。
 
-- `type`：默认由 FFmpeg 码流 parser 解析出 **I / P / B / S**（只解析帧头、不解码像素，速度接近纯 demux）；`samples` 由音频 packet duration 按采样率换算（AAC 通常 1024），视频帧显示 `-`。
+- `type`：**同步读每个 packet 自己的 slice header** —— H.264/H.265 的 `slice_type`、MPEG-1/2 的 `picture_coding_type`、全 I 编码直通 `I`；`AV_PKT_FLAG_KEY` 作为随机访问点的权威兜底（真 IDR 必显示琥珀色 `I`）。无法识别的码流才显示 `-`。**不用 `AVCodecParserContext`、也不用解码器输出**：`av_parser_parse2()` 吐出上一帧且 `pict_type` 会保持到下一帧被识别，贴到当前包行会把帧类型与 pts 错配（实测 1 s GOP 的 RTSP 流会出现「开头 3 个 I、之后每 GOP 2 个 I」，真 IDR 反被标成 P）；增量快照行一经发布也无法回填。同步读取零滞后、零状态，因此 P/B 标志和 I 一样准确。`samples` 由音频 packet duration 按采样率换算（AAC 通常 1024），视频帧显示 `-`。回归见 `tests/slice_type_test.cpp` / `tests/pict_type_test.py`。
 - **`dims` / `format` / `ch` 是解码专属列**：`dims` 为 `宽x高`（仅视频 Tab 有此列），`format` 为像素格式（视频）或采样格式（音频），`ch` 为声道数（仅音频 Tab 有此列）。未勾选「解码」、或该包没解出帧时显示 `-`。
-- **勾选「解码」是纯附加操作**：为**每条流的前 `maxDecodeFrames` 帧**（默认 3000）补上面三列，**不会改变行数、`pkt#`、时间戳、`type` 或 `samples`**。刻意不从解码器取帧类型/采样数——B 帧重排下第 N 个包并不产出第 N 个显示帧，旧实现曾因此把 I/P/B 与 pts 错配。
+- **勾选「解码」是纯附加操作**：为**每条流的前 `maxDecodeFrames` 帧**（默认 3000）补上面三列，**不会改变行数、`pkt#`、时间戳、`type` 或 `samples`**。刻意不从解码器取帧类型/采样数——B 帧重排下第 N 个包并不产出第 N 个显示帧，旧实现曾因此把 I/P/B 与 pts 错配；帧类型已由包自身的 slice header 同步给出，解码不得改写。
 - **超出解码预算时保留前若干帧信息**：预算用尽后后续行只是退回包级（末三列 `-`），**已解出的头部行仍保留 `dims`/`format`/`ch`**。黄色提示行明确写出 `frame-level dims/format/ch ARE shown on the first N rows (maxDecodeFrames=... per stream); later rows stay packet-level only`。按流计数可避免音频包密集的容器把全局配额吃光、让视频 Tab 整页都是 `-`。每次分析完成（含部分结果）表格都会自动回到第 1 行第 1 列，确保这些头部行一打开就可见。
 - 分析结束会 flush 解码器，提示行显示 `decode: N frames + M tail frames flushed`；解码器有启动延迟，开头几个包可能仍为 `-`（本样本 250 个视频包中 248 行有 extras）。
 - **矩形单元格选区**（与旧版 `QTableWidget` 一致）：在表格里**按住鼠标左键拖出一片矩形**，覆盖到的单元格整块蓝底白字高亮；点 `#` 列则一次选中整行（当前 Tab 的全部列），`Shift` + 点/拖可从锚点扩展选区。切换 Tab 或重新分析会清空选区。
@@ -139,7 +172,7 @@ Qt Quick Controls 强制使用 **Basic** 风格，避免系统/Material 配色�
 
 - **URL 规范化**：`file:///C:/x` → `file:C:/x`（FFmpeg 在 Windows 下不接受三斜杠盘符形式，这是旧版「不支持」的主因之一）；去引号/空白；反斜杠转换；未知 scheme 原样透传并标注。
 - **多流模型**：任意路 video/audio/subtitle/data/attachment 都被列出，不再假设「一路视频 + 一路音频」。
-- **元数据优先 + 轻量帧类型**：默认只 demux，用 `AVCodecParserContext` 解析 I/P/B、用 packet duration 换算音频采样数，不解码像素；`--decode` 才做真实解码（**每条流最多前 `maxDecodeFrames` 帧**），且**只附加帧级几何/格式 extras**，严格保持「一行 = 一个包」，避免 B 帧重排导致的类型与时间戳错配；超预算不丢弃已有 extras，结束时 flush 解码器并统计尾帧。
+- **元数据优先 + 同步帧类型**：默认只 demux，`type` 列由 `infra/include/ma/infra/SliceType.hpp` 直接读当前 packet 的 slice header 得出 `I/P/B`（不解码像素、不跨包保持状态），`AV_PKT_FLAG_KEY` 兜底保证真 IDR 不被误标为 P/B；`samples` 由 packet duration 按采样率换算。**既不从码流 parser、也不从解码器取 I/P/B** —— 两者输出都相对 packet 滞后一帧或更多，且增量快照已发布的行无法回填。`--decode` 才做真实解码（**每条流最多前 `maxDecodeFrames` 帧**），且**只附加帧级几何/格式 extras**，严格保持「一行 = 一个包」；概览「关键帧」计数独立按 `keyframe` 累计，不受 P/B 标签影响。超预算不丢弃已有 extras，结束时 flush 解码器并统计尾帧。
 - **帧级 extras 可观测**：表格 `dims`/`format`/`ch` 三列、CLI human 输出的 `pix=`/`sfmt=`/`ch=`、CLI JSON 的 `width`/`height`/`pixFmt`/`sampleFmt`/`channels`/`decoded` 字段。
 - **诊断面板阶段耗时**：`core::StageTimings` 记录 open / find_stream_info / demux 三段各自耗时与 total（未到达的阶段为 `-1`，序列化为 `null`）。CLI human 输出 `timings` 行、`--json` 输出 `timings:{open,probe,demux,total}`、GUI「详情」toast 展示 `open Xs · probe Ys · demux Zs`；失败时仍保留已发生阶段的耗时（例如 open 超时会显示 open 用时、probe/demux 为 `—`），把「慢在哪一步」直接摊开。
 - **三阶段超时**：连接 / 逐包无数据 / **探测（find_stream_info）** 各自独立。探测阶段单独用 `probeSeconds`（默认 `max(60 s, 4×stall)`）兜底，避免慢速 HLS 直播 / 高延迟 RTSP 在探测时因为「没有新包」被误判为 stall 超时；`--probe-timeout S` 或 GUI 配置可显式指定。`interrupt_callback` 在 `avformat_open_input` **之前**挂上，慢速 HTTPS 连接也能立即取消/超时。
@@ -148,6 +181,8 @@ Qt Quick Controls 强制使用 **Basic** 风格，避免系统/Material 配色�
 - **结构化错误**：每次失败都有 `{code, stage, nativeCode, av_strerror 文本, hint, url}`，界面以内联提示条 + 状态栏展示，不再弹模态框。
 - **协议自动识别 + 高级选项**：QML 按 URL 前缀/扩展名判定 RTSP / RTMP / HLS / HTTP-FLV；GUI「配置」可传任意 `K=V` 给 FFmpeg（`rtsp_transport=tcp`、`reconnect=1` 等），CLI 等价写法为 `--opt K=V`。
 - **本地实测**：用 MediaMTX + FFmpeg 推流验证 `rtsp://` / `rtmp://` / `.m3u8` 均解析成功（各 120 包 / 2 条流）；GUI 对本地 RTSP 实时流点「停止解析」得到 `已停止解析 · 仅显示已解析的前 379 个包`，无弹窗、表格有部分行。
+- **实时流增量发布**：直播源没有 EOF，若只在分析结束时发布结果，界面会永远停在「解析中 · 0 行」。现在探测完成即推送流信息，demux 期间按 128 包 / 0.25 s 双阈值推送新增帧批次，GUI 用 `beginInsertRows` 增量追加到表格，**不重置选区 / 过滤 / 滚动位置**；最终 `result` 仍带完整结果并覆盖一次。详见 §「进程隔离」的 IPC 契约与 `tests/live_stream_gui_test.py`（本地无限 TS 流端到端回归）。
+- **HLS 时间轴与对齐诊断（PDT 可选）**：读取 m3u8（本地 / HTTP 走同一 AVIO 路径），用 `io_open` 回调把每个包归属到实测分片；无 PDT 时以 ΣEXTINF 构造相对时间轴并照常诊断分片缺失、漏标 discontinuity、A/V 偏移与时钟漂移，有 PDT 时自动升级为绝对墙上时钟并支持 `--compare` 跨录制文件精确对齐。详见 §「HLS 录制文件对齐诊断」。
 - **有界帧存储**：`maxFrames` 上限，超出标记 truncated。
 - **可观测**：`av_log` 回调接入，CLI 输出 stderr，GUI 走同一条链路。
 - **非 ASCII 路径**：GUI 用 UTF-8 把路径传给 FFmpeg（避免中文目录在 GBK 代码页下损坏）。
@@ -159,7 +194,8 @@ GUI 主进程（`media-analyse.exe`）**不**直接链接 FFmpeg。分析内核�
 `QProcess` 拉起，二者用**行分隔 JSON**在 stdin/stdout 上通信：
 
 - 主进程 → worker：`{"type":"analyze","input":"<url|file>","options":{...}}`（也可发 `{"type":"cancel"}` 取消）。
-- worker → 主进程：流式 `{"type":"progress",...}` + 最终 `{"type":"result",<toJson>}`。
+- worker → 主进程：流式 `{"type":"progress",...}`；探测完成后一条 `{"type":"streams",<toJson，无 frames>}`；demux 期间流式 `{"type":"frames",<toJson，仅本批新增行>}`；最终 `{"type":"result",<toJson 全量>}`。
+- `streams` / `frames` 是**纯增量观察**，复用同一份 `toJson`/`fromJson`，不改变最终结果的语义；CLI 不传快照回调，因此完全不产生这两类行。快照由 `core::AnalysisSnapshot` + `ProbeAnalyzer` 在 demux 循环里按包数/时间节流生成，GUI 侧 `AnalysisController::liveUpdated` 消费。
 - 协议契约集中在 `core/include/ma/core/Serialization.hpp`，CLI `--json`、worker、GUI 三方共用同一 wire format，保证可互解析。
 
 崩溃隔离的好处：**任何 FFmpeg / 解码器崩溃只杀 worker，主窗口保留现场**。
@@ -225,6 +261,9 @@ python tests/fuzz_worker.py --exe build/win-mingw/cli/media-analyse-cli.exe \
 - [x] P3 部分：协议自动识别、FFmpeg 高级选项透传（含 RTSP over TCP / 自动重连预设）、探测超时配置
 - [x] P2：worker 进程隔离（QProcess + 行分隔 JSON IPC）、minidump（CrashHandler + `[CRASHDUMP]`）、fuzz 变异回归（`tests/fuzz_worker.py`）已落地并通过 1 万次变异 0 崩溃冒烟
 - [x] 运行日志与诊断收集：跨进程滚动日志（QML 警告 / FFmpeg 输出 / 凭据脱敏）、GUI「日志」按钮、`collect-logs.cmd` 一键收集；`tests/log_smoke.py` 17/17 通过
+- [x] 实时流增量显示：流信息 + 帧行在「解析中」持续增长（修复直播流永远 0 行）；`tests/live_snapshot_test.py` 17/17、`tests/live_stream_gui_test.py` 构建树与分发包均 PASS
+- [x] 概览与流信息合并为可折叠 SUMMARY 分组（点击折叠头 / `Ctrl+Shift+S` / 小窗口自动折叠），NOTICE 常显；`tests/summary_fold_test.py` 5/5 通过，折叠后可见帧行 6 → 26
+- [x] HLS 录制文件对齐诊断（PDT 可选、自动三档降级）：分片归属、缺分片/漏标 discontinuity、A/V 偏移与时钟漂移、`--compare`/`--anchor-ms` 跨文件对齐、SUMMARY 内 ALIGNMENT 卡片；`tests/alignment_test.cpp` 40/40、`tests/alignment_cli_test.py` 12/12
 - [ ] P2 剩余：样本库与 golden 回归（等实际崩溃样本与流地址清单）
 - [x] P3 部分：诊断面板阶段耗时分解（open / find_stream_info / demux，贯穿 CLI human + `--json` + GUI 详情）
 - [ ] P3 剩余：`protocol_whitelist` 白名单快捷项、TLS / 自签证书 / 鉴权快捷项

@@ -33,6 +33,9 @@ media-analyse-cli [options] <url|file>
   --probe-timeout S           探测（find_stream_info）超时（秒）
   --max-frames N              最多读取包数
   --opt K=V                   透传 FFmpeg 高级选项（如 rtsp_transport=tcp）
+  --no-align                  跳过 HLS 时间轴 / 对齐后处理
+  --compare <file>            再分析一份录制文件，输出两份的时间偏差（comparison）
+  --anchor-ms N               两份都缺 PDT 时，用人工同步点指定偏移（毫秒）
 ```
 
 示例：
@@ -57,13 +60,16 @@ media-analyse-cli --opt rtsp_transport=tcp rtsp://127.0.0.1:8554/live
 
 列释义：
 
-- `type`：由码流 parser 解析的 `I / P / B / S`（只解析帧头，不解码像素，速度接近纯 demux）。
+- `type`：同步读取当前 packet 的 slice header（H.264/H.265 `slice_type`、MPEG-1/2 `picture_coding_type`、全 I 编码直通 `I`），`AV_PKT_FLAG_KEY` 兜底保证真 IDR 显示琥珀色 `I`；`P` / `B` 与该行 pts 严格对应，无法识别的码流才显示 `-`。不用滞后的码流 parser / 解码器输出。
 - `samples`：音频 packet 按采样率换算的采样数（AAC 通常 1024）。
 - `dims`（视频）/ `format` / `ch`（音频）：**解码专属列**，需勾选「解码」才显示具体值；超出每流解码预算时，仅前若干帧显示，不丢行。
 
 ## 5. 验收结果
 
-- CLI 回归 `tests/smoke_cli_json.py`：**14/14 通过**（JSON 合法性、I/P/B、samples、解码纯附加、按流预算、提示语等）。
+- CLI 回归 `tests/smoke_cli_json.py`：**14/14 通过**（JSON 合法性、I/P/B slice 类型、samples、解码纯附加、按流预算、提示语等）。
+- 帧类型一致性 `tests/pict_type_test.py`：**8/8 通过**（key 行必为 `I`、非 key 行保留 `P/B`、无启动 I 爆发、每 GOP 一个 I、`--decode` 不改变类型序列）；底层 `tests/slice_type_test.cpp` **21/21**（合成 Annex-B/avcC/HEVC/MPEG-2 NAL + 4000 组畸形输入扫描）。
+- 真实 RTSP 录制流（`1 s GOP`、H.264 High@L4.0）：4 s 共 119 帧 = **4 个 I + 115 个 P**，I 位置 `[1, 73, 152, 224]`，与 `ffprobe -show_frames` 的解码结果完全一致；修复前曾误标 7 个 I 且真 IDR 显示 P。
+- 概览折叠 `tests/summary_fold_test.py`：**5/5 通过**（结构契约 4 项 + 实机截图对比）。点击折叠头后帧表首行由物理 y=1156 上移到 748，可见帧行分隔线 8 → 26（肉眼可见行数 5 → 14），`Ctrl+Shift+S` 可一键恢复；NOTICE 提示条收起时仍常显。小窗口（高度 <780 逻辑像素）自动折叠。
 - GUI 实机：文件模式、网络流模式、矩形选区/复制、过滤、滚轮、视频/音频 Tab 列裁剪、解码补充、配置弹窗、停止部分结果均无 QML 报错。
 - 本地 MediaMTX + FFmpeg 推流：RTSP / RTMP / HLS 均可解析并停止于部分结果（无弹窗）。
 - **进程隔离**：GUI 经 `QProcess` 拉起 `analyzer-worker.exe`，控制器头测 `tests/controller_test.cpp` 验证完整链路 `controller → QProcess → worker → JSON → fromJson → analysisSucceeded` 通过。
@@ -72,11 +78,13 @@ media-analyse-cli --opt rtsp_transport=tcp rtsp://127.0.0.1:8554/live
 - **阶段耗时诊断（P3）**：`StageTimings` 记录 open / find_stream_info / demux / total；CLI `timings` 行、`--json` 的 `timings` 对象、GUI「详情」toast 均展示，失败时保留已发生阶段（未到达为 `null`/`—`）。`ser_test` 覆盖其序列化往返（含 `-1 → null → -1`）。
 - **运行日志与诊断收集**：三进程各写一份滚动 UTF-8 日志（含 QML/Qt 警告、FFmpeg `av_log`、worker 生命周期、崩溃应急写入），URL 凭据自动脱敏；GUI 顶栏「日志」按钮 + `collect-logs.cmd` 一键诊断 zip。`tests/log_smoke.py` **17/17 通过**（落盘 / 脱敏 / `off` 零写入 / 滚动代数 / 包内可写），打包产物实跑 GUI 后生成 2 份日志、收集脚本产出 zip 已验证。
 - **fuzz 变异回归** `tests/fuzz_worker.py`：1 万次随机变异 + 截断输入喂给 worker，**0 未处理崩溃**（crash=0 / timeout=0 / abnormal_exit=0）；畸形输入全部被内核转为结构化诊断（`clean_fail`），不崩溃进程。
+- **HLS 录制文件对齐诊断（2026-11-09）**：`#EXT-X-PROGRAM-DATE-TIME` 为可选锚点，按 `program-date-time / playlist-elapsed / pts-only` 三档自动降级；无 PDT 的清单依旧能查出分片缺失与漏标 discontinuity，有 PDT 时自动升级为绝对墙上时钟并支持 `--compare` 跨文件精确对齐。`tests/alignment_test.cpp` **40/40**、`tests/alignment_cli_test.py` **12/12**（构建树与 `dist/` 分发包均通过，含 worker IPC 与三种比较模式）。四种真实清单实测：有 PDT 样本 0 error、漏标样本报 `unmarked-discontinuity`、已标注样本仅 info、缺分片样本报 `segment-missing`（此前 `diag=ok` 零告警）。GUI SUMMARY 新增一行式 `ALIGNMENT` 折叠头，展开可见墙上时钟、每流偏移/漂移与问题列表；折叠回归仍 5/5（展开 6 行 → 折叠 26 行）。
 
 ## 6. 已知限制与后续待办
 
 - **P2 进程隔离 + minidump + fuzz 已完成**：分析内核拆为独立 `analyzer-worker.exe`，崩溃只杀 worker 并写 `<exedir>/crashes/<app>-<ts>.dmp`（stderr 打 `[CRASHDUMP]` 行）；看门狗最多自动重启一次；`tests/fuzz_worker.py` 跑通 1 万次变异 0 崩溃。**样本库 / golden 回归仍待补**（需实际崩溃样本与流地址清单）。
 - **P3 流媒体剩余**：`protocol_whitelist` 白名单快捷项、TLS / 自签证书 / 鉴权快捷项（阶段耗时分解已完成：open / find_stream_info / demux 贯穿 CLI 与 GUI）。
+- **HLS 对齐诊断待校准**：master playlist 目前只标记、不自动选 variant；加密分片 / BYTERANGE / fMP4 init segment 未做专项处理；HTTP HLS 会多一次清单 GET；漂移 60 ms/min、A/V 偏移 80/250 ms 阈值需用真实故障录制样本校准。PDT 后续上线后无需改代码即自动升级为绝对时间轴。
 - **P5 发布**：绿色包已可脚本化产出——`python scripts/package.py` 从构建树挑出 `media-analyse.exe` + `analyzer-worker.exe` + Qt/FFmpeg DLL + 插件/QML 模块，落到 `dist/MediaAnalyse-v1.0/`（不含测试 exe 与运行日志，但预建 `logs/README.txt` 并附带 `collect-logs.cmd`）；版本号与变更日志仍为人工维护。
 
 ## 7. 故障排查

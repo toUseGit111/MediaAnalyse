@@ -241,6 +241,100 @@ std::string joptS(const std::optional<std::string>& v) {
 // tell "not reached" from a real-but-fast zero.
 std::string joptSec(double v) { return v < 0.0 ? std::string("null") : jnum(v); }
 
+// ---- alignment / comparison writers ---------------------------------------
+
+void appendAlignment(std::string& o, const ma::AlignmentReport& a) {
+    o += ",\"alignment\":{";
+    o += "\"timeline\":" + jstr(ma::toString(a.timeline)) + ",";
+    o += "\"note\":" + jstr(a.timelineNote) + ",";
+    o += "\"referenceStream\":" + std::to_string(a.referenceStream) + ",";
+    o += std::string("\"crossFileComparable\":") +
+         (a.crossFileComparable ? "true" : "false") + ",";
+    o += "\"firstWallClockMs\":" + joptI64(a.firstWallClockMs) + ",";
+    o += "\"lastWallClockMs\":" + joptI64(a.lastWallClockMs) + ",";
+    o += "\"firstWallClock\":" +
+         jstr(a.firstWallClockMs ? ma::formatEpochMsUtc(*a.firstWallClockMs)
+                                 : std::string()) + ",";
+    o += "\"lastWallClock\":" +
+         jstr(a.lastWallClockMs ? ma::formatEpochMsUtc(*a.lastWallClockMs)
+                                : std::string()) + ",";
+    o += "\"coveredSeconds\":" + jnum(a.coveredSeconds) + ",";
+    o += "\"warningCount\":" + std::to_string(a.warningCount) + ",";
+    o += "\"errorCount\":" + std::to_string(a.errorCount) + ",";
+
+    o += "\"playlist\":{";
+    o += "\"source\":" + jstr(a.playlist.source) + ",";
+    o += std::string("\"isMaster\":") + (a.playlist.isMaster ? "true" : "false") + ",";
+    o += std::string("\"hasEndList\":") + (a.playlist.hasEndList ? "true" : "false") + ",";
+    o += "\"targetDuration\":" + jnum(a.playlist.targetDuration) + ",";
+    o += "\"mediaSequence\":" + std::to_string(a.playlist.mediaSequence) + ",";
+    o += "\"pdtCount\":" + std::to_string(a.playlist.pdtCount) + ",";
+    o += "\"totalDuration\":" + jnum(a.playlist.totalDuration()) + ",";
+    o += "\"segments\":[";
+    for (size_t i = 0; i < a.playlist.segments.size(); ++i) {
+        const auto& s = a.playlist.segments[i];
+        o += "{\"index\":" + std::to_string(s.index) + ",";
+        o += "\"mediaSequence\":" + std::to_string(s.mediaSequence) + ",";
+        o += "\"uri\":" + jstr(s.uri) + ",";
+        o += "\"extinf\":" + jnum(s.extinfSeconds) + ",";
+        o += "\"pdtMs\":" + joptI64(s.pdtMs) + ",";
+        o += "\"pdt\":" + jstr(s.pdtMs ? ma::formatEpochMsUtc(*s.pdtMs)
+                                       : std::string()) + ",";
+        o += std::string("\"discontinuity\":") +
+             (s.discontinuity ? "true" : "false") + ",";
+        o += "\"playlistStart\":" + jnum(s.playlistStartSeconds) + ",";
+        o += std::string("\"opened\":") + (s.opened ? "true" : "false") + ",";
+        o += "\"packetCount\":" + std::to_string(s.packetCount) + ",";
+        o += "\"firstPts\":" + joptD(s.firstPtsSeconds) + ",";
+        o += "\"lastPts\":" + joptD(s.lastPtsSeconds) + "}";
+        if (i + 1 < a.playlist.segments.size()) o += ",";
+    }
+    o += "]},";
+
+    o += "\"streams\":[";
+    for (size_t i = 0; i < a.streams.size(); ++i) {
+        const auto& s = a.streams[i];
+        o += "{\"stream\":" + std::to_string(s.streamIndex) + ",";
+        o += "\"kind\":" + jstr(ma::toString(s.kind)) + ",";
+        o += "\"codec\":" + jstr(s.codec) + ",";
+        o += "\"packetCount\":" + std::to_string(s.packetCount) + ",";
+        o += "\"firstPts\":" + jnum(s.firstPtsSeconds) + ",";
+        o += "\"lastPts\":" + jnum(s.lastPtsSeconds) + ",";
+        o += "\"startOffsetMs\":" + jnum(s.startOffsetMs) + ",";
+        o += "\"driftMsPerMin\":" + jnum(s.driftMsPerMin) + ",";
+        o += "\"nonMonotonic\":" + std::to_string(s.nonMonotonicCount) + ",";
+        o += "\"maxGapSeconds\":" + jnum(s.maxGapSeconds) + ",";
+        o += "\"discontinuityCount\":" + std::to_string(s.discontinuityCount) + "}";
+        if (i + 1 < a.streams.size()) o += ",";
+    }
+    o += "],";
+
+    o += "\"issues\":[";
+    for (size_t i = 0; i < a.issues.size(); ++i) {
+        const auto& x = a.issues[i];
+        o += "{\"severity\":" + jstr(x.severity) + ",";
+        o += "\"code\":" + jstr(x.code) + ",";
+        o += "\"message\":" + jstr(x.message) + ",";
+        o += "\"stream\":" + std::to_string(x.streamIndex) + ",";
+        o += "\"segment\":" + std::to_string(x.segmentIndex) + ",";
+        o += "\"atSeconds\":" + jnum(x.atSeconds) + "}";
+        if (i + 1 < a.issues.size()) o += ",";
+    }
+    o += "]}";
+}
+
+void appendComparison(std::string& o, const ma::TimelineComparison& c) {
+    o += ",\"comparison\":{";
+    o += std::string("\"comparable\":") + (c.comparable ? "true" : "false") + ",";
+    o += "\"method\":" + jstr(c.method) + ",";
+    o += "\"offsetMs\":" + jnum(c.offsetMs) + ",";
+    o += "\"confidence\":" + jnum(c.confidence) + ",";
+    o += "\"overlapSeconds\":" + jnum(c.overlapSeconds) + ",";
+    o += "\"note\":" + jstr(c.note) + ",";
+    o += "\"firstWallClockA\":" + joptI64(c.firstWallClockA) + ",";
+    o += "\"firstWallClockB\":" + joptI64(c.firstWallClockB) + "}";
+}
+
 // ---- string <-> enum helpers ----------------------------------------------
 
 StreamKind kindFromString(const std::string& k) {
@@ -271,13 +365,118 @@ Errc errcFromString(const std::string& s) {
     return Errc::Ok;
 }
 
+// ---- alignment / comparison readers ---------------------------------------
+
+double jd(const JVal* x, double fallback = 0.0) {
+    return (x && !x->isNull()) ? x->asDouble() : fallback;
+}
+long long ji(const JVal* x, long long fallback = 0) {
+    return (x && !x->isNull()) ? x->asInt() : fallback;
+}
+std::string js(const JVal* x) {
+    return (x && !x->isNull()) ? x->asString() : std::string();
+}
+std::optional<double> jod(const JVal* x) {
+    return (x && !x->isNull()) ? std::optional<double>(x->asDouble()) : std::nullopt;
+}
+std::optional<int64_t> joi(const JVal* x) {
+    return (x && !x->isNull()) ? std::optional<int64_t>(x->asInt()) : std::nullopt;
+}
+
+std::shared_ptr<ma::AlignmentReport> parseAlignment(const JVal& v) {
+    if (!v.isObject()) return {};
+    auto a = std::make_shared<ma::AlignmentReport>();
+    a->timeline = ma::timelineKindFromString(js(v.find("timeline")));
+    a->timelineNote = js(v.find("note"));
+    a->referenceStream = static_cast<int>(ji(v.find("referenceStream"), -1));
+    if (const JVal* x = v.find("crossFileComparable"))
+        a->crossFileComparable = x->asBool();
+    a->firstWallClockMs = joi(v.find("firstWallClockMs"));
+    a->lastWallClockMs = joi(v.find("lastWallClockMs"));
+    a->coveredSeconds = jd(v.find("coveredSeconds"));
+    a->warningCount = static_cast<int>(ji(v.find("warningCount")));
+    a->errorCount = static_cast<int>(ji(v.find("errorCount")));
+
+    if (const JVal* pl = v.find("playlist"); pl && pl->isObject()) {
+        a->playlist.source = js(pl->find("source"));
+        if (const JVal* x = pl->find("isMaster")) a->playlist.isMaster = x->asBool();
+        if (const JVal* x = pl->find("hasEndList")) a->playlist.hasEndList = x->asBool();
+        a->playlist.targetDuration = jd(pl->find("targetDuration"));
+        a->playlist.mediaSequence = ji(pl->find("mediaSequence"));
+        a->playlist.pdtCount = static_cast<int>(ji(pl->find("pdtCount")));
+        if (const JVal* segs = pl->find("segments"); segs && segs->isArray()) {
+            for (const auto& sv : segs->arr) {
+                ma::HlsSegment s;
+                s.index = static_cast<int>(ji(sv.find("index"), -1));
+                s.mediaSequence = ji(sv.find("mediaSequence"), -1);
+                s.uri = js(sv.find("uri"));
+                s.extinfSeconds = jd(sv.find("extinf"));
+                s.pdtMs = joi(sv.find("pdtMs"));
+                if (const JVal* x = sv.find("discontinuity"))
+                    s.discontinuity = x->asBool();
+                s.playlistStartSeconds = jd(sv.find("playlistStart"));
+                if (const JVal* x = sv.find("opened")) s.opened = x->asBool();
+                s.packetCount = static_cast<int>(ji(sv.find("packetCount")));
+                s.firstPtsSeconds = jod(sv.find("firstPts"));
+                s.lastPtsSeconds = jod(sv.find("lastPts"));
+                a->playlist.segments.push_back(std::move(s));
+            }
+        }
+    }
+
+    if (const JVal* arr = v.find("streams"); arr && arr->isArray()) {
+        for (const auto& sv : arr->arr) {
+            ma::StreamSyncMeta m;
+            m.streamIndex = static_cast<int>(ji(sv.find("stream"), -1));
+            m.kind = kindFromString(js(sv.find("kind")));
+            m.codec = js(sv.find("codec"));
+            m.packetCount = static_cast<int>(ji(sv.find("packetCount")));
+            m.firstPtsSeconds = jd(sv.find("firstPts"));
+            m.lastPtsSeconds = jd(sv.find("lastPts"));
+            m.startOffsetMs = jd(sv.find("startOffsetMs"));
+            m.driftMsPerMin = jd(sv.find("driftMsPerMin"));
+            m.nonMonotonicCount = static_cast<int>(ji(sv.find("nonMonotonic")));
+            m.maxGapSeconds = jd(sv.find("maxGapSeconds"));
+            m.discontinuityCount = static_cast<int>(ji(sv.find("discontinuityCount")));
+            a->streams.push_back(std::move(m));
+        }
+    }
+    if (const JVal* arr = v.find("issues"); arr && arr->isArray()) {
+        for (const auto& iv : arr->arr) {
+            ma::AlignmentIssue x;
+            x.severity = js(iv.find("severity"));
+            x.code = js(iv.find("code"));
+            x.message = js(iv.find("message"));
+            x.streamIndex = static_cast<int>(ji(iv.find("stream"), -1));
+            x.segmentIndex = static_cast<int>(ji(iv.find("segment"), -1));
+            x.atSeconds = jd(iv.find("atSeconds"), -1.0);
+            a->issues.push_back(std::move(x));
+        }
+    }
+    return a;
+}
+
+ma::TimelineComparison parseComparison(const JVal& v) {
+    ma::TimelineComparison c;
+    if (!v.isObject()) return c;
+    if (const JVal* x = v.find("comparable")) c.comparable = x->asBool();
+    c.method = js(v.find("method"));
+    c.offsetMs = jd(v.find("offsetMs"));
+    c.confidence = jd(v.find("confidence"));
+    c.overlapSeconds = jd(v.find("overlapSeconds"));
+    c.note = js(v.find("note"));
+    c.firstWallClockA = joi(v.find("firstWallClockA"));
+    c.firstWallClockB = joi(v.find("firstWallClockB"));
+    return c;
+}
+
 } // namespace
 
 // ---- public API ------------------------------------------------------------
 
 std::string toJson(const AnalysisResult& r, const Diagnostic& d, bool withFrames,
                    const std::string& type, const std::string& ffmpegVersion,
-                   int64_t frameLimit) {
+                   int64_t frameLimit, const TimelineComparison* comparison) {
     std::string o;
     o.reserve(4096);
     o += "{";
@@ -358,6 +557,8 @@ std::string toJson(const AnalysisResult& r, const Diagnostic& d, bool withFrames
             o += "\"durationTime\":" + joptD(f.durationTime) + ",";
             o += "\"size\":" + std::to_string(f.size) + ",";
             o += std::string("\"key\":") + (f.keyframe ? "true" : "false") + ",";
+            o += "\"segment\":" + std::to_string(f.segmentIndex) + ",";
+            o += "\"wallClockMs\":" + joptI64(f.wallClockMs) + ",";
             o += "\"pictType\":" + joptS(f.pictType) + ",";
             o += "\"samples\":" + joptI64(f.samples) + ",";
             o += std::string("\"decoded\":") + (f.decoded ? "true" : "false") + ",";
@@ -374,12 +575,15 @@ std::string toJson(const AnalysisResult& r, const Diagnostic& d, bool withFrames
 
     o += ",\"totalPackets\":" + std::to_string(r.totalPacketsRead);
     o += std::string(",\"truncated\":") + (r.truncated ? "true" : "false");
+    if (r.alignment) appendAlignment(o, *r.alignment);
+    if (comparison) appendComparison(o, *comparison);
     if (!ffmpegVersion.empty()) o += ",\"ffmpeg\":" + jstr(ffmpegVersion);
     o += "}";
     return o;
 }
 
-bool fromJson(const std::string& json, AnalysisResult& r, Diagnostic& d) {
+bool fromJson(const std::string& json, AnalysisResult& r, Diagnostic& d,
+              TimelineComparison* comparison) {
     const JVal root = parseJsonOrNull(json);
     if (!root.isObject()) return false;
 
@@ -455,6 +659,11 @@ bool fromJson(const std::string& json, AnalysisResult& r, Diagnostic& d) {
                 f.durationTime = x->isNull() ? std::nullopt : std::optional<double>(x->asDouble());
             if (const JVal* x = fv.find("size")) f.size = x->asInt();
             if (const JVal* x = fv.find("key")) f.keyframe = x->asBool();
+            if (const JVal* x = fv.find("segment"))
+                f.segmentIndex = static_cast<int>(x->asInt());
+            if (const JVal* x = fv.find("wallClockMs"))
+                f.wallClockMs = x->isNull() ? std::nullopt
+                                            : std::optional<int64_t>(x->asInt());
             if (const JVal* x = fv.find("pictType"))
                 f.pictType = x->isNull() ? std::nullopt : std::optional<std::string>(x->asString());
             if (const JVal* x = fv.find("samples"))
@@ -476,6 +685,11 @@ bool fromJson(const std::string& json, AnalysisResult& r, Diagnostic& d) {
 
     if (const JVal* x = root.find("totalPackets")) r.totalPacketsRead = x->asInt();
     if (const JVal* x = root.find("truncated")) r.truncated = x->asBool();
+    if (const JVal* x = root.find("alignment")) r.alignment = parseAlignment(*x);
+    if (comparison) {
+        if (const JVal* x = root.find("comparison"))
+            *comparison = parseComparison(*x);
+    }
     return true;
 }
 
@@ -490,6 +704,7 @@ std::string toOptionsJson(const AnalysisOptions& o) {
     s += std::string("\"decodeFrames\":") + (o.decodeFrames ? "true" : "false") + ",";
     s += "\"maxDecodeFrames\":" + std::to_string(o.maxDecodeFrames) + ",";
     s += std::string("\"keepUnknownStreams\":") + (o.keepUnknownStreams ? "true" : "false") + ",";
+    s += std::string("\"enableAlignment\":") + (o.enableAlignment ? "true" : "false") + ",";
     s += "\"extraOptions\":[";
     for (size_t i = 0; i < o.extraOptions.size(); ++i) {
         s += "{\"k\":" + jstr(o.extraOptions[i].first) +
@@ -512,6 +727,7 @@ bool fromOptionsJson(const JVal& root, AnalysisOptions& o) {
     if (const JVal* x = root.find("decodeFrames")) o.decodeFrames = x->asBool();
     if (const JVal* x = root.find("maxDecodeFrames")) o.maxDecodeFrames = x->asInt();
     if (const JVal* x = root.find("keepUnknownStreams")) o.keepUnknownStreams = x->asBool();
+    if (const JVal* x = root.find("enableAlignment")) o.enableAlignment = x->asBool();
     if (const JVal* eo = root.find("extraOptions"); eo && eo->isArray()) {
         for (const auto& e : eo->arr) {
             if (!e.isObject()) continue;

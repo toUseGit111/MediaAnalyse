@@ -67,8 +67,9 @@ QString FrameTableModel::cellText(const ma::FrameRecord& f, int column,
     case ColDuration: return QString::number(f.duration);
     case ColSize: return QString::number(f.size);
     case ColType:
-        // Audio/data rows have no picture type. Video key frames are already
-        // labelled "I" in packetToRecord, so no "K" fallback is needed here.
+        // I/P/B is read synchronously from this packet's own slice header;
+        // "-" only when the bitstream type cannot be identified. Keyframe
+        // counting uses f.keyframe, independently of these labels.
         return f.pictType ? QString::fromStdString(*f.pictType)
                           : QStringLiteral("-");
     case ColSamples:
@@ -104,6 +105,22 @@ void FrameTableModel::reset(const std::vector<ma::FrameRecord>* frames) {
     filter_.clear();      // a new result starts unfiltered
     rebuildMap();
     endResetModel();
+}
+
+void FrameTableModel::rowsAppended(int oldVisibleCount) {
+    if (!frames_) return;
+    // A filtered view maps visible rows to source rows, so insertion indices
+    // cannot be derived from the backing vector; rebuild the whole mapping.
+    if (!filter_.isEmpty()) {
+        beginResetModel();
+        rebuildMap();
+        endResetModel();
+        return;
+    }
+    const int added = static_cast<int>(frames_->size()) - oldVisibleCount;
+    if (added <= 0) return;
+    beginInsertRows(QModelIndex(), oldVisibleCount, oldVisibleCount + added - 1);
+    endInsertRows();
 }
 
 void FrameTableModel::setFilter(const QString& text) {
@@ -252,6 +269,93 @@ void AnalysisController::openLogFolder() {
     }
     MA_LOGI("bridge", "opening log folder=" << dir.toUtf8().constData());
     QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+}
+
+static QVariantList streamsToVariantList(
+    const std::vector<ma::StreamInfo>& streams) {
+    QVariantList out;
+    out.reserve(static_cast<int>(streams.size()));
+    for (const auto& s : streams) {
+        out.append(QVariantMap{
+            {"index", s.index},
+            {"kind", QString::fromLatin1(ma::toString(s.kind))},
+            {"codec", QString::fromStdString(s.codecName)},
+            {"profile", QString::fromStdString(s.profile)},
+            {"level", s.level},
+            {"width", s.width},
+            {"height", s.height},
+            {"pixFmt", QString::fromStdString(s.pixFmt)},
+            {"frameRate", s.frameRate},
+            {"channels", s.channels},
+            {"sampleRate", s.sampleRate},
+            {"sampleFmt", QString::fromStdString(s.sampleFmt)},
+            {"timeBase", QString::fromStdString(s.timeBase)},
+            {"duration", s.duration},
+        });
+    }
+    return out;
+}
+
+// HLS timeline / A-V alignment report -> a compact QVariantMap for the
+// SUMMARY panel. Kept in the bridge (the only layer allowed to see both
+// ma::core and Qt); QML never parses JSON itself.
+static QVariantMap alignmentToVariantMap(const ma::AlignmentReport& a) {
+    QVariantList issues;
+    for (const auto& x : a.issues) {
+        issues.append(QVariantMap{
+            {"severity", QString::fromStdString(x.severity)},
+            {"code", QString::fromStdString(x.code)},
+            {"message", QString::fromStdString(x.message)},
+            {"segment", x.segmentIndex},
+            {"atSeconds", x.atSeconds},
+        });
+    }
+    QVariantList streams;
+    for (const auto& s : a.streams) {
+        streams.append(QVariantMap{
+            {"stream", s.streamIndex},
+            {"kind", QString::fromLatin1(ma::toString(s.kind))},
+            {"codec", QString::fromStdString(s.codec)},
+            {"startOffsetMs", s.startOffsetMs},
+            {"driftMsPerMin", s.driftMsPerMin},
+            {"maxGapSeconds", s.maxGapSeconds},
+        });
+    }
+    QVariantList segments;
+    for (const auto& s : a.playlist.segments) {
+        segments.append(QVariantMap{
+            {"index", s.index},
+            {"uri", QString::fromStdString(s.uri)},
+            {"extinf", s.extinfSeconds},
+            {"opened", s.opened},
+            {"pdt", s.pdtMs
+                        ? QString::fromStdString(ma::formatEpochMsUtc(*s.pdtMs))
+                        : QString()},
+            {"packetCount", s.packetCount},
+        });
+    }
+    return QVariantMap{
+        {"timeline", QString::fromLatin1(ma::toString(a.timeline))},
+        {"note", QString::fromStdString(a.timelineNote)},
+        {"crossFile", a.crossFileComparable},
+        {"firstWallClock", a.firstWallClockMs
+                               ? QString::fromStdString(
+                                     ma::formatEpochMsUtc(*a.firstWallClockMs))
+                               : QString()},
+        {"lastWallClock", a.lastWallClockMs
+                              ? QString::fromStdString(
+                                    ma::formatEpochMsUtc(*a.lastWallClockMs))
+                              : QString()},
+        {"coveredSeconds", a.coveredSeconds},
+        {"warningCount", a.warningCount},
+        {"errorCount", a.errorCount},
+        {"referenceStream", a.referenceStream},
+        {"segmentCount", static_cast<int>(a.playlist.segments.size())},
+        {"pdtCount", a.playlist.pdtCount},
+        {"issues", issues},
+        {"streams", streams},
+        {"segments", segments},
+    };
 }
 
 static QVariantMap diagToMap(const ma::Diagnostic& d,
@@ -508,7 +612,7 @@ void AnalysisController::finishWith(ma::Outcome<ma::AnalysisResult> outcome) {
     int64_t keyFrames = 0;
     int64_t decodedRows = 0;
     for (const auto& f : frameStore_) {
-        if (f.pictType && (*f.pictType == "I" || *f.pictType == "K")) ++keyFrames;
+        if (f.keyframe) ++keyFrames;
         if (f.decoded) ++decodedRows;
     }
     double frameRate = 0.0;
@@ -517,24 +621,17 @@ void AnalysisController::finishWith(ma::Outcome<ma::AnalysisResult> outcome) {
             frameRate = s.frameRate;
     }
 
-    QVariantList streams;
-    for (const auto& s : r.streams) {
-        streams.append(QVariantMap{
-            {"index", s.index},
-            {"kind", QString::fromLatin1(ma::toString(s.kind))},
-            {"codec", QString::fromStdString(s.codecName)},
-            {"profile", QString::fromStdString(s.profile)},
-            {"level", s.level},
-            {"width", s.width},
-            {"height", s.height},
-            {"pixFmt", QString::fromStdString(s.pixFmt)},
-            {"frameRate", s.frameRate},
-            {"channels", s.channels},
-            {"sampleRate", s.sampleRate},
-            {"sampleFmt", QString::fromStdString(s.sampleFmt)},
-            {"timeBase", QString::fromStdString(s.timeBase)},
-            {"duration", s.duration},
-        });
+    const QVariantList streams = streamsToVariantList(r.streams);
+    QVariantMap alignmentMap;
+    if (r.alignment) {
+        alignmentMap = alignmentToVariantMap(*r.alignment);
+        MA_LOGI("bridge", "alignment timeline="
+                              << ma::toString(r.alignment->timeline)
+                              << " segments="
+                              << r.alignment->playlist.segments.size()
+                              << " pdt=" << r.alignment->playlist.pdtCount
+                              << " errors=" << r.alignment->errorCount
+                              << " warnings=" << r.alignment->warningCount);
     }
 
     const bool partial = userStopped || failed || r.truncated;
@@ -560,6 +657,7 @@ void AnalysisController::finishWith(ma::Outcome<ma::AnalysisResult> outcome) {
         {"probeSeconds", r.timings.probeSeconds},
         {"demuxSeconds", r.timings.demuxSeconds},
         {"notes", QString::fromStdString(outcome.diag.hint)},
+        {"alignment", alignmentMap},
     };
     if (userStopped) {
         statusText_ = tr("Stopped by user - showing %1 partial rows")
@@ -580,6 +678,112 @@ void AnalysisController::finishWith(ma::Outcome<ma::AnalysisResult> outcome) {
     stopping_ = false;
     emit busyChanged();
     emit stoppingChanged();
+}
+
+// ---------------- live incremental publishing ----------------
+//
+// A live source has no EOF, so the final "result" line may never arrive while
+// the user is watching. The worker now streams a "streams" line right after
+// probing and "frames" batches while demuxing. Both reuse toJson()/fromJson(),
+// so no second wire format exists. The final result still replaces everything
+// through finishWith() when the run ends (Stop / EOF / maxFrames / failure).
+
+void AnalysisController::handleLiveStreams(ma::AnalysisResult& r) {
+    liveHeader_ = r;
+    liveHeader_.frames.clear();       // a "streams" line never carries rows
+    liveHeader_.totalPacketsRead = 0;
+    liveStreams_ = r.streams;
+    liveStreamVariants_ = streamsToVariantList(r.streams);
+    liveFramesStarted_ = false;      // first batch replaces the old table
+    livePackets_ = 0;
+    liveElapsed_ = r.timings.totalSeconds > 0 ? r.timings.totalSeconds : 0.0;
+    liveKeyFrames_ = 0;
+    liveDecodedRows_ = 0;
+    // Deliberately keep the previous table on screen until real rows arrive:
+    // a slow probe must not blank a result the user is still inspecting.
+    MA_LOGI("bridge", "live streams snapshot count=" << liveStreams_.size()
+                          << " format=" << liveHeader_.formatName);
+    emit liveUpdated(liveSummary(true), liveStreamVariants_);
+}
+
+void AnalysisController::handleLiveFrames(ma::AnalysisResult& r) {
+    if (!liveFramesStarted_) {
+        liveFramesStarted_ = true;
+        frameStore_.clear();
+        videoRows_.clear();
+        audioRows_.clear();
+        liveKeyFrames_ = 0;
+        liveDecodedRows_ = 0;
+        videoModel_.reset(&videoRows_);
+        audioModel_.reset(&audioRows_);
+    }
+    const int oldVideoRows = videoModel_.rowCount();
+    const int oldAudioRows = audioModel_.rowCount();
+
+    for (const auto& f : r.frames) {
+        frameStore_.push_back(f);
+        if (f.keyframe) ++liveKeyFrames_;
+        if (f.decoded) ++liveDecodedRows_;
+        for (const auto& s : liveStreams_) {
+            if (s.index != f.streamIndex) continue;
+            if (s.kind == ma::StreamKind::Video) videoRows_.push_back(f);
+            else if (s.kind == ma::StreamKind::Audio) audioRows_.push_back(f);
+            break;
+        }
+    }
+    videoModel_.rowsAppended(oldVideoRows);
+    audioModel_.rowsAppended(oldAudioRows);
+    emit countsChanged();
+
+    if (r.totalPacketsRead > livePackets_) livePackets_ = r.totalPacketsRead;
+    if (r.timings.totalSeconds > liveElapsed_)
+        liveElapsed_ = r.timings.totalSeconds;
+    // Every batch is observable at debug level (used by the live-stream
+    // regression); info level stays throttled so an hours-long live capture
+    // cannot fill the rolling log with near-identical lines.
+    ++snapshotLogTick_;
+    if (snapshotLogTick_ % 25 == 1)
+        MA_LOGI("bridge", "live frames batch=" << r.frames.size()
+                              << " rows=" << frameStore_.size()
+                              << " packets=" << livePackets_);
+    else
+        MA_LOGD("bridge", "live frames batch=" << r.frames.size()
+                              << " rows=" << frameStore_.size()
+                              << " packets=" << livePackets_);
+    // Empty stream list on this signal tells QML to keep the cards it already
+    // has; only the first "streams" snapshot publishes the stream list.
+    emit liveUpdated(liveSummary(false), QVariantList{});
+}
+
+QVariantMap AnalysisController::liveSummary(bool withStreamCount) const {
+    double frameRate = 0.0;
+    for (const auto& s : liveStreams_) {
+        if (s.kind == ma::StreamKind::Video && s.frameRate > frameRate)
+            frameRate = s.frameRate;
+    }
+    QVariantMap m{
+        {"formatName", QString::fromStdString(liveHeader_.formatName)},
+        {"formatLongName", QString::fromStdString(liveHeader_.formatLongName)},
+        {"duration", liveHeader_.duration},
+        {"bitrate", static_cast<qint64>(liveHeader_.bitrate)},
+        {"totalPackets", static_cast<qint64>(livePackets_)},
+        {"truncated", false},
+        {"partial", false},
+        {"stopped", false},
+        {"videoFrames", static_cast<qint64>(videoRows_.size())},
+        {"audioFrames", static_cast<qint64>(audioRows_.size())},
+        {"keyFrames", static_cast<qint64>(liveKeyFrames_)},
+        {"decodedRows", static_cast<qint64>(liveDecodedRows_)},
+        {"frameRate", frameRate},
+        {"elapsedSeconds", liveElapsed_},
+        {"openSeconds", liveHeader_.timings.openSeconds},
+        {"probeSeconds", liveHeader_.timings.probeSeconds},
+        {"demuxSeconds", liveHeader_.timings.demuxSeconds},
+        {"notes", QStringLiteral("")},
+    };
+    if (withStreamCount)
+        m["streamCount"] = static_cast<int>(liveStreams_.size());
+    return m;
 }
 
 // ---------------- worker process management (P2) ----------------
@@ -644,6 +848,18 @@ void AnalysisController::handleWorkerLine(const std::string& line) {
         if (++progressLogTick_ % 50 == 1)
             MA_LOGD("bridge", "worker progress packets=" << pk << " elapsed=" << el);
         emit progressUpdated(pk, el);
+        return;
+    }
+    if (t == "streams" || t == "frames") {
+        ma::AnalysisResult r;
+        ma::Diagnostic d;
+        if (!ma::core::fromJson(line, r, d)) {
+            MA_LOGW("bridge", "unparsable worker snapshot: "
+                                  << line.substr(0, 200));
+            return;
+        }
+        if (t == "streams") handleLiveStreams(r);
+        else handleLiveFrames(r);
         return;
     }
     // Everything else (the final "result", or any unrecognised line) is parsed

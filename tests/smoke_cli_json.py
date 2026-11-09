@@ -8,7 +8,7 @@ Pure standard library. Build the CLI first, then:
 Guards the bug where --frames=N (N < total frames) emitted a trailing comma
 in the "frames" array, producing unparseable JSON. Also covers the
 success / no-frames / failure paths and, when a video file is supplied,
-I/P/B picture types and audio sample counts.
+synchronous I/P/B slice types and audio sample counts.
 
 Additionally guards the decode-path contract: --decode must be purely
 additive (frame-level extras only, identical packet rows), must not shift
@@ -138,24 +138,54 @@ def main():
         results.append(check("decode is additive", decode_is_additive))
 
         if video:
-            def picture_types():
+            def slice_types():
+                # Two regressions in one: the delayed AVCodecParser bug
+                # ("3 I at startup, 2 per GOP") AND the over-correction that
+                # removed P/B entirely. Key frames must be "I", and ordinary
+                # frames must keep the real I/P/B read synchronously from
+                # their own slice header - no parser, no decoder, no lag.
                 rc, d = run(cli, ["--json", "--frames=40", video])
                 assert rc == 0 and d["ok"] is True, (rc, d.get("error"))
                 vidx = {s["index"] for s in d["streams"] if s["kind"] == "video"}
-                types = [f["pictType"] for f in d["frames"] if f["stream"] in vidx]
-                assert types and any(t in ("I", "P", "B", "S") for t in types), types[:10]
-                samples = [f["samples"] for f in d["frames"] if f["stream"] not in vidx]
-                return "pict=%s samples=%s" % (types[:8], samples[:3])
-            results.append(check("video I/P/B + samples", picture_types))
+                codecs = [s.get("codec", "") for s in d["streams"]
+                          if s["kind"] == "video"]
+                vf = [f for f in d["frames"] if f["stream"] in vidx]
+                assert vf, "no video rows"
+                for f in vf:
+                    assert f.get("pictType") in (None, "I", "P", "B"), (
+                        f["seq"], f.get("pictType"))
+                    if f["key"]:
+                        assert f.get("pictType") == "I", (
+                            f["seq"], "keyframe not labelled I",
+                            f.get("pictType"))
+                assert any(f["key"] for f in vf), "no keyframe in first 40 rows"
+                nonkey = [f for f in vf if not f["key"]]
+                typed = [f for f in nonkey
+                         if (f.get("pictType") or "") in ("I", "P", "B")]
+                intra = any(c in " ".join(codecs) for c in
+                            ("mjpeg", "prores", "dnxhd", "rawvideo", "ffv1",
+                             "huffyuv", "png", "jpeg2000"))
+                if not intra and len(nonkey) >= 3:
+                    assert typed, ("no P/B labels on non-key frames; "
+                                   "slice reader is not running")
+                samples = [f["samples"] for f in d["frames"]
+                           if f["stream"] not in vidx]
+                return "video=%d keys=%d p/b=%d pict=%s samples=%s" % (
+                    len(vf), sum(1 for f in vf if f["key"]), len(typed),
+                    [f.get("pictType") for f in vf[:8]], samples[:3])
+            results.append(check("slice types", slice_types))
 
             def decode_keeps_types():
+                # Decode stays purely additive: I/P/B already comes from the
+                # packet's own slice header, so decoder output (B-frame
+                # reordering) must never rewrite the type sequence.
                 _, plain = run(cli, ["--json", "--frames=60", video])
                 _, dec = run(cli, ["--json", "--frames=60", "--decode", video])
-                ta = [f["pictType"] for f in plain["frames"]]
-                tb = [f["pictType"] for f in dec["frames"]]
+                ta = [f.get("pictType") for f in plain["frames"]]
+                tb = [f.get("pictType") for f in dec["frames"]]
                 assert ta == tb, "decode changed type sequence (B-frame shift?)"
                 return "types identical (%d rows)" % len(ta)
-            results.append(check("decode keeps I/P/B", decode_keeps_types))
+            results.append(check("decode keeps types", decode_keeps_types))
 
             def decode_extras():
                 _, d = run(cli, ["--json", "--frames=40", "--decode", video])
@@ -223,7 +253,7 @@ def main():
                 return "notes: %s" % notes[:110]
             results.append(check("decode budget hint", decode_budget_hint))
         else:
-            for name in ("video I/P/B + samples", "decode keeps I/P/B",
+            for name in ("slice types", "decode keeps types",
                          "decode frame extras", "decode budget cap",
                          "decode budget keeps head", "decode budget per stream",
                          "decode budget hint"):

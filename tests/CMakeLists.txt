@@ -4,8 +4,21 @@ add_executable(ma_ser_test ser_test.cpp)
 target_link_libraries(ma_ser_test PRIVATE ma::core)
 target_compile_features(ma_ser_test PRIVATE cxx_std_20)
 
+# Synchronous I/P/B bitstream reader: header-only, no FFmpeg / Qt linkage.
+add_executable(ma_slice_type_test slice_type_test.cpp)
+target_include_directories(ma_slice_type_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/infra/include)
+target_compile_features(ma_slice_type_test PRIVATE cxx_std_20)
+
+# HLS timeline + A/V alignment (optional PDT): pure core, no media files.
+add_executable(ma_alignment_test alignment_test.cpp)
+target_link_libraries(ma_alignment_test PRIVATE ma::core)
+target_compile_features(ma_alignment_test PRIVATE cxx_std_20)
+
 enable_testing()
 add_test(NAME ser_test COMMAND ma_ser_test)
+add_test(NAME slice_type_test COMMAND ma_slice_type_test)
+add_test(NAME alignment_test COMMAND ma_alignment_test)
 
 # Controller integration test (P2): needs Qt/bridge, so only with the app build.
 if(MA_ENABLE_APP)

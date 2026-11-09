@@ -2,6 +2,7 @@
 add_library(ma_core STATIC
     src/UrlNormalizer.cpp
     src/Serialization.cpp
+    src/Alignment.cpp
 )
 add_library(ma::core ALIAS ma_core)
 

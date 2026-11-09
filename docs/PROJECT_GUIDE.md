@@ -54,13 +54,13 @@ MediaAnalyse/
 
 | 目录 | 包含内容 | 边界规则 |
 |---|---|---|
-| `core/` | `Result.hpp`（`Outcome`/`Diagnostic`：**错误即数据**）、`MediaInfo.hpp`（`AnalysisResult`/`StreamInfo`/`FrameRecord`/`StageTimings`）、`Analyzer.hpp`（分析接口 + `AnalysisOptions`）、`UrlNormalizer`（`file:///C:/` → `file:C:/` 等 7 类修正）、`Serialization`（**JSON wire format 契约**：`toJson`/`fromJson`/`parseAnalyzeRequest`） | 不 include 任何 Qt / FFmpeg 头；不含 I/O 策略 |
-| `infra/` | `AvHandle.hpp`（RAII）、`Log.hpp`（`av_log` → stderr 桥接）、`Interrupt.cpp`（分阶段超时 + 协作取消）、`ProbeAnalyzer.cpp`（open → find_stream_info → demux，可选解码）、`CrashHandler.cpp`（minidump + 异常过滤器）、`Logger.hpp/.cpp`（跨进程滚动文件日志 + 凭据脱敏 + 崩溃应急写入） | 只依赖 `core` + FFmpeg；不出现 Qt |
-| `worker/` | `worker_main.cpp`：从 stdin 读一条 analyze 请求，向 stdout 流式写 progress、最后写 result；独立线程监听 `cancel`；启动即装 CrashHandler | 只链接 `core`+`infra`，**不链接 Qt**；崩溃只死自己 |
-| `bridge/` | `Bridge.hpp/.cpp`：`AnalysisController`（`QProcess` 拉起 worker、解析 JSON、看门狗 + 自动重启一次、取消）、`FrameTableModel`（多列 `QAbstractTableModel` + 文本过滤 + 可见行映射） | 唯一允许同时接触内核与 Qt 的层；QML 只认这一层 |
+| `core/` | `Result.hpp`（`Outcome`/`Diagnostic`：**错误即数据**）、`MediaInfo.hpp`（`AnalysisResult`/`StreamInfo`/`FrameRecord`/`StageTimings`）、`Analyzer.hpp`（分析接口 + `AnalysisOptions`）、`Alignment.hpp/.cpp`（**HLS 时间轴与对齐诊断**：playlist 解析、PDT 可选的三档时间基准、诊断算法、跨文件比较）、`UrlNormalizer`（`file:///C:/` → `file:C:/` 等 7 类修正）、`Serialization`（**JSON wire format 契约**：`toJson`/`fromJson`/`parseAnalyzeRequest`，含 `alignment`/`comparison` 段） | 不 include 任何 Qt / FFmpeg 头；不含 I/O 策略 |
+| `infra/` | `Raii.hpp`（RAII）、`Interrupt.cpp`（`av_log` → 日志桥接 + 分阶段超时 + 协作取消）、`SliceType.hpp`（**同步 I/P/B 位流读取**：header-only、无 FFmpeg 依赖、逐包 slice header 解析）、`HlsTimeline.hpp/.cpp`（AVIO 读 m3u8 + `io_open` 分片归属追踪）、`ProbeAnalyzer.cpp`（open → find_stream_info → demux，可选解码）、`CrashHandler.cpp`（minidump + 异常过滤器）、`Logger.hpp/.cpp`（跨进程滚动文件日志 + 凭据脱敏 + 崩溃应急写入） | 只依赖 `core` + FFmpeg；不出现 Qt |
+| `worker/` | `worker_main.cpp`：从 stdin 读一条 analyze 请求，向 stdout 流式写 progress、探测后的 `streams` 行与逐批 `frames` 行，最后写全量 result；独立线程监听 `cancel`；启动即装 CrashHandler | 只链接 `core`+`infra`，**不链接 Qt**；崩溃只死自己 |
+| `bridge/` | `Bridge.hpp/.cpp`：`AnalysisController`（`QProcess` 拉起 worker、解析 JSON、看门狗 + 自动重启一次、取消、`liveUpdated` 增量发布）、`FrameTableModel`（多列 `QAbstractTableModel` + 文本过滤 + 可见行映射 + `rowsAppended` 增量插入） | 唯一允许同时接触内核与 Qt 的层；QML 只认这一层 |
 | `app/` | `main.cpp`（`QApplication` + 命令行传参自动分析 + CrashHandler）、`qml/`（`Main.qml` 布局交互、`Theme.qml` 设计令牌单例、`PrismButton/SectionHead/MetricCell/StreamCard/FrameGrid` 组件） | QML 不直接碰 C++ 内核，全部经 `bridge` |
 | `cli/` | `main.cpp`：参数解析、human / `--json` 两种输出、退出码约定 | 与 worker 共用同一 `Serialization`，输出格式不会漂移 |
-| `tests/` | `ser_test.cpp`（序列化往返 + 信封 + timings `-1→null→-1`）、`controller_test.cpp`（**无窗口**控制器头测）、`smoke_cli_json.py`（CLI JSON 回归 14 项）、`gui_integration_test.py`（GUI+worker 隔离冒烟）、`fuzz_worker.py`（变异/截断 fuzz）、`log_smoke.py`（日志 17 项回归）、`assets/sample.mp4`（4 s、320×176 H.264 + AAC 测试素材）、`manual/`（需本地推流环境的手工脚本：`ma_gui_check.py` 窗口截图/驱动、`ma_hls_test.py`、`ma_live_test.py`） | 单测只依赖 `ma_core`，不拖 FFmpeg/Qt；`controller_test` 仅在 `MA_ENABLE_APP=ON` 时构建 |
+| `tests/` | `ser_test.cpp`（序列化往返 + 信封 + timings `-1→null→-1`）、`slice_type_test.cpp`（同步 I/P/B 位流读取 21 项：合成 Annex-B/avcC/HEVC/MPEG-2 NAL + 畸形输入扫描，纯头文件无 FFmpeg 依赖）、`controller_test.cpp`（**无窗口**控制器头测）、`smoke_cli_json.py`（CLI JSON 回归 14 项）、`pict_type_test.py`（帧类型一致性 8 项，可直接喂文件 / RTSP 地址 / 可选 ffprobe 对照）、`gui_integration_test.py`（GUI+worker 隔离冒烟）、`summary_fold_test.py`（折叠结构 4 项 + 实机截图对比 1 项：自动定位折叠头、点击折叠、`Ctrl+Shift+S` 恢复、帧表行分隔符上移与行数增长）、`live_snapshot_test.py`（增量快照协议 17 项）、`live_stream_gui_test.py`（本地无限 TS 流端到端）、`fuzz_worker.py`（变异/截断 fuzz）、`log_smoke.py`（日志 17 项回归）、`alignment_test.cpp`（HLS 时间轴/对齐纯算法 40 项）、`alignment_cli_test.py`（四种真实 m3u8 清单端到端 12 项，样本缺失时用 ffmpeg 再生成）、`assets/sample.mp4`（4 s、320×176 H.264 + AAC 测试素材）、`manual/`（需本地推流环境的手工脚本：`ma_gui_check.py` 窗口截图/驱动、`ma_hls_test.py`、`ma_live_test.py`） | `ser_test` 只依赖 `ma_core`，`slice_type_test` 只 include 一个纯头文件；都不拖 FFmpeg/Qt；`controller_test` 仅在 `MA_ENABLE_APP=ON` 时构建 |
 | `scripts/` | `package.py`：从构建树挑出运行时文件，产出一个干净的可分发目录；`collect-logs.cmd` + `collect_logs.ps1`：一键把日志 / minidump / 环境信息打包成 zip | 幂等；不修改构建树；收集脚本只用 Windows 自带组件 |
 | `docs/` | `design/`（PRISM 设计稿：`design-preview.html`、`media-analyzer.qss`、参考截图、`qt_reference.py`）、`screenshots/`（成品界面 6 张 + `final_ui.png`）、`verification/`（fuzz 报告 JSON）、`PROJECT_GUIDE.md`（本文） | 纯文档资产，不参与构建 |
 
@@ -78,7 +78,7 @@ MediaAnalyse/
              └───────────────────────────────────────────────────────────────────────┘
 ```
 
-`core::Serialization` 是唯一的协议实现：CLI `--json`、worker→GUI 的 result 行、`fromJson` 解析全部走它，因此**三方格式天然一致**，不会出现「CLI 能读、GUI 读不了」。
+`core::Serialization` 是唯一的协议实现：CLI `--json`、worker→GUI 的 `streams`/`frames`/`result` 行、`fromJson` 解析全部走它，因此**三方格式天然一致**，不会出现「CLI 能读、GUI 读不了」。`streams`/`frames` 由 `ProbeAnalyzer` 的可选 `SnapshotFn` 回调产出，CLI 不传该回调，所以命令行输出完全不受影响。
 
 ---
 
@@ -191,7 +191,7 @@ media-analyse.exe D:/videos/a.mp4
 media-analyse.exe "rtsp://127.0.0.1:8554/live"
 ```
 
-界面自上而下 8 个区块：APP BAR（品牌 / 状态 / 配置）→ SOURCE（本地文件 / 网络流）→ OVERVIEW（5 个指标：时长 / 码率 / 包数 / 耗时 / 容器）→ NOTICE（三态提示条，可关闭）→ STREAMS（每路流卡片）→ TOOLBAR（视频/音频 Tab + 过滤 + 复制）→ DATAVIEW（帧表）→ STATUS（提示 / 选区 / 行数）。
+界面逻辑上分 7 个区块：APP BAR（品牌 / 状态 / 配置）→ SOURCE（本地文件 / 网络流）→ SUMMARY（**一个可折叠分组**：折叠头 + OVERVIEW 5 指标 + STREAMS 流卡片 + ALIGNMENT 对齐诊断折叠头）→ NOTICE（三态提示条，可关闭）→ TOOLBAR（视频/音频 Tab + 过滤 + 复制）→ DATAVIEW（帧表）→ STATUS（提示 / 选区 / 行数）。实际视觉顺序中 NOTICE 位于 OVERVIEW 与 STREAMS 之间，它属于 SUMMARY 容器但**不随折叠隐藏**。
 
 关键操作：
 
@@ -204,15 +204,21 @@ media-analyse.exe "rtsp://127.0.0.1:8554/live"
 | `Ctrl+C` / 「复制选区」 | 按 TSV 写入剪贴板，可直接粘进 Excel |
 | 过滤框 | 按任意列文本筛选；Tab 行数与状态栏同步 |
 | 滚轮 | 上下滚动（一格 3 行），`Shift` + 滚轮横向 |
+| 「SUMMARY / 概览与流信息」折叠头 | 点击整行或按 `Ctrl+Shift+S`：一次性收起 / 展开 OVERVIEW 指标条与 STREAMS 流卡片，DATAVIEW 因 `Layout.fillHeight` 自动补满腾出的高度（约 230–350 px，实测可见帧行 6 → 26）。收起后折叠头仍显示「来源 · N 条流 · M 包」摘要；NOTICE 提示条常显。窗口高度 <780 逻辑像素且未手动切换过时自动折叠，手动切换后以用户选择为准 |
+| 「ALIGNMENT / 对齐诊断」折叠头 | 分析完成后出现，默认只占一行（时间基准 + 错误/警告数），点击展开墙上时钟起止、每条流的起始偏移 / 时钟漂移 / 最大空档与问题列表。无 PDT 显示「相对时间轴」；有 PDT 显示「PDT 绝对时钟」 |
 | 「配置」 | 连接 / 无数据 / 探测三个超时、最大帧数、最大解码帧数、RTSP over TCP、自动重连、`K=V` 高级选项；**下次分析生效** |
 | 提示条「详情」 | toast 展示完整诊断：错误码 / 阶段 / 原生码 / 地址 / `open Xs · probe Ys · demux Zs` |
+
+帧表 `type` 列同步读取**每个 packet 自己的 slice header**（H.264/H.265 `slice_type`、MPEG-1/2 `picture_coding_type`、全 I 编码直通 `I`），因此 `I` / `P` / `B` 都与该行的时间戳严格对应；`AV_PKT_FLAG_KEY` 作为权威兜底，保证真 IDR 不会被误标成 `P`。无法识别的码流才显示 `-`。概览「关键帧」独立按 `keyframe` 计数，不受 P/B 标签影响。**不用 `AVCodecParserContext`、也不用解码器输出**：`av_parser_parse2()` 吐出的是上一帧且 `pict_type` 会保持到下一帧被识别，贴到当前包行会造成帧类型与时间戳错配（实测 1 s GOP 的 RTSP 流出现「开头 3 个 I、之后每 GOP 2 个 I」）；增量快照行一经发布也无法事后回填。实现见 `infra/include/ma/infra/SliceType.hpp`，回归见 `tests/slice_type_test.cpp` / `tests/pict_type_test.py`。
+
+**实时流（无 EOF）行为**：直播地址不会自然结束，因此数据不是「分析完才显示」。探测（`find_stream_info`）一结束就推送一次 `streams` 快照，STREAMS 卡片与概览立即出现；demux 期间每累计 128 包且距上批 ≥0.25 s 推送一批 `frames`，GUI 用 `beginInsertRows` 增量追加帧行，**不清除选区、过滤框和滚动位置**，状态保持 `LIVE · 帧解析中`。点「停止解析」或达到 `maxFrames` 后，worker 发出最终 `result`，界面按完整结果覆盖一次并显示部分结果提示。若长时间停在「解析中」但表格 0 行，先看 `logs/media-analyse.log` 是否出现 `live streams snapshot` / `live frames batch`：没有 `streams` 说明还卡在连接/探测阶段，有 `streams` 无 `frames` 说明源端没有持续送包。
 
 帧表列按 Tab 自适应（各 13 列）：
 
 - 视频：`# pkt# stream dts dts-time dts-delta pts pts-time duration size type dims format`
 - 音频：`# pkt# stream dts dts-time dts-delta pts pts-time duration size samples format ch`
 
-`type` 由码流 parser 解析（只读帧头，不解码像素）；`dims/format/ch` 是**解码专属列**，勾选「解码」后为每条流前 `maxDecodeFrames` 帧补充，且**不改变行数/时间戳/type/samples**。
+`type` 由当前 packet 的 slice header 同步解析（只读帧头，不解码像素、不使用滞后的 FFmpeg parser）；`dims/format/ch` 是**解码专属列**，勾选「解码」后为每条流前 `maxDecodeFrames` 帧补充，且**不改变行数/时间戳/type/samples**。
 
 ### 5.2 CLI
 
@@ -221,7 +227,8 @@ media-analyse-cli [--json] [--frames[=N]] [--decode] \
                   [--max-frames N] [--max-decode-frames N] \
                   [--probesize B] [--analyze-duration US] \
                   [--connect-timeout S] [--stall-timeout S] [--probe-timeout S] \
-                  [--opt K=V] <url|file>
+                  [--opt K=V] [--no-align] [--compare <file>] [--anchor-ms N] \
+                  <url|file>
 ```
 
 | 选项 | 说明 |
@@ -233,6 +240,11 @@ media-analyse-cli [--json] [--frames[=N]] [--decode] \
 | `--max-decode-frames N` | 每条流最多解码多少帧（默认 3000） |
 | `--connect-timeout / --stall-timeout / --probe-timeout` | 连接 / 逐包无数据 / `find_stream_info` 三阶段独立超时（秒） |
 | `--opt K=V` | 透传 FFmpeg 选项，可重复：`--opt rtsp_transport=tcp` |
+| `--no-align` | 跳过 HLS 时间轴 / 对齐后处理，只输出原始包 |
+| `--compare <file>` | 再分析一份录制文件，输出 `comparison`（两份都有 PDT 时为精确墙上时钟偏移） |
+| `--anchor-ms N` | 无 PDT 时给 `--compare` 指定人工同步点（毫秒，正值=主文件更晚，置信度 0.5） |
+
+对齐诊断详见 README §「HLS 录制文件对齐诊断（PDT 可选）」。选项可以放在主输入之前或之后；未加引号、含空格的 Windows 路径仍会被自动拼接。
 
 退出码：`0` 成功，`1` 分析失败（stderr 有结构化诊断），`2` 用法错误。
 
@@ -309,8 +321,8 @@ JSON 信封（成功路径，节选）：
 ## 6. 测试与验证
 
 ```bash
-# 单元测试（无 FFmpeg、无 Qt，秒级）
-ctest --test-dir build/win-mingw -R ser_test --output-on-failure
+# 单元测试（无 FFmpeg、无 Qt，秒级）：序列化 + 同步 I/P/B 位流读取 + HLS 对齐算法
+ctest --test-dir build/win-mingw --output-on-failure
 
 # 控制器头测：controller → QProcess → worker → JSON → fromJson → analysisSucceeded
 build/win-mingw-app/ma_controller_test.exe tests/assets/sample.mp4
@@ -318,19 +330,38 @@ build/win-mingw-app/ma_controller_test.exe tests/assets/sample.mp4
 # CLI JSON 契约回归（14 项，改 CLI/serialization 后必跑）
 python tests/smoke_cli_json.py tests/assets/sample.mp4
 
+# 帧类型一致性（8 项）：key=I、非 key 保留 P/B、无启动 I 爆发、每 GOP 一个 I、解码纯附加
+python tests/pict_type_test.py
+python tests/pict_type_test.py rtsp://127.0.0.1:8554/live --stall-timeout 5
+python tests/pict_type_test.py build/rtsp_4s.ts --ffprobe  # 与 ffprobe 解码直方图对照
+
 # GUI + worker 隔离冒烟（需 Qt 运行时 DLL 在 PATH 上）
 python tests/gui_integration_test.py
 python tests/gui_integration_test.py --app dist/MediaAnalyse-v1.0/media-analyse.exe  # 验证打包结果
 
+# 概览折叠（结构 4 项 + 实机截图对比，需 Qt 运行时 DLL 在 PATH 上）
+python tests/summary_fold_test.py
+python tests/summary_fold_test.py --app dist/MediaAnalyse-v1.0/media-analyse.exe
+
+# worker 增量快照协议（17 项：streams/frames 顺序、批次不重叠、result 仍完整）
+python tests/live_snapshot_test.py
+
+# 无限流端到端：本地循环推 MPEG-TS，验证「解析中」时流信息与帧行持续增长
+python tests/live_stream_gui_test.py
+python tests/live_stream_gui_test.py --app dist/MediaAnalyse-v1.0/media-analyse.exe
+
 # 日志回归（17 项：落盘 / 脱敏 / 滚动 / off / 包内可写）
 python tests/log_smoke.py
+
+# HLS 对齐诊断端到端（12 项：有/无 PDT、缺分片、漏标 discontinuity、IPC、三种比较模式）
+python tests/alignment_cli_test.py
 
 # fuzz：随机变异 + 截断，1 万次喂 worker
 python tests/fuzz_worker.py --exe build/win-mingw-app/analyzer-worker.exe \
                             --seed tests/assets/sample.mp4 --mode worker --iters 10000
 ```
 
-判定标准：`ser_test` 打印 `ALL PASS`；`smoke_cli_json.py` 必须 `14/14 checks passed`；`log_smoke.py` 必须 `17/17 checks passed`；fuzz 必须 `crash=0 / timeout=0 / abnormal=0`（`clean_fail` 是畸形输入被转成结构化诊断，属预期）。历史报告见 `docs/verification/`。
+判定标准：`ctest` 三个测试（`ser_test` / `slice_type_test` / `alignment_test`）全绿，`alignment_test` 打印 `40/40 checks passed`；`smoke_cli_json.py` 必须 `14/14 checks passed`；`pict_type_test.py` 必须 `8/8 checks passed`；`live_snapshot_test.py` 必须 `17/17 checks passed`；`live_stream_gui_test.py` 必须 `LIVE STREAM GUI: PASS`；`summary_fold_test.py` 必须 `5/5 checks passed`；`log_smoke.py` 必须 `17/17 checks passed`；`alignment_cli_test.py` 必须 `12/12 checks passed`；fuzz 必须 `crash=0 / timeout=0 / abnormal=0`（`clean_fail` 是畸形输入被转成结构化诊断，属预期）。历史报告见 `docs/verification/`。
 
 需要真实推流环境的手工脚本在 `tests/manual/`（需自备 `mediamtx` 与 ffmpeg 推流）：
 

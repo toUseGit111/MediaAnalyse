@@ -14,13 +14,21 @@
 //   --stall-timeout S     between-packets timeout, seconds
 //   --probe-timeout S     hard ceiling for find_stream_info (0 = auto)
 //   --opt K=V             pass raw option to FFmpeg (repeatable)
+//   --no-align            skip HLS timeline / A-V alignment post-processing
+//   --compare <file>      analyze a second recording and report their offset;
+//                         exact with #EXT-X-PROGRAM-DATE-TIME, otherwise a
+//                         clearly-labelled relative/manual alignment
+//   --anchor-ms N         manual sync point for --compare when PDT is absent
+//                         (positive = primary starts later, in milliseconds)
 // Exit codes: 0 ok, 1 failure (diagnostic printed), 2 usage error.
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -42,6 +50,8 @@ struct CliArgs {
     int64_t printFrameLimit = 0; // 0 = all printed frames
     ma::AnalysisOptions opts;
     std::string input;
+    std::string compare;                       // optional second recording
+    std::optional<double> anchorMs;            // manual sync point
 };
 
 std::string optArg(const std::vector<std::string>& a, size_t& i) {
@@ -107,7 +117,8 @@ std::string fmtSec(double v) {
     return b;
 }
 
-void printHuman(const ma::AnalysisResult& r, const ma::Diagnostic& d, const CliArgs& args) {
+void printHuman(const ma::AnalysisResult& r, const ma::Diagnostic& d,
+                const CliArgs& args, const ma::TimelineComparison* cmp = nullptr) {
     std::printf("url used      : %s\n", d.url.c_str());
     if (!d.hint.empty()) std::printf("notes         : %s\n", d.hint.c_str());
     if (!r.formatName.empty())
@@ -163,6 +174,46 @@ void printHuman(const ma::AnalysisResult& r, const ma::Diagnostic& d, const CliA
         }
         if (r.frames.empty()) std::printf("  (no frames stored)\n");
     }
+
+    if (r.alignment) {
+        const auto& a = *r.alignment;
+        std::printf("alignment     : %s | cross-file=%s | covered %.3f s | "
+                    "%d error, %d warning\n",
+                    ma::toString(a.timeline),
+                    a.crossFileComparable ? "YES (PDT)" : "no",
+                    a.coveredSeconds, a.errorCount, a.warningCount);
+        std::printf("  time base   : %s\n", a.timelineNote.c_str());
+        if (a.firstWallClockMs)
+            std::printf("  wall clock  : %s -> %s\n",
+                        ma::formatEpochMsUtc(*a.firstWallClockMs).c_str(),
+                        a.lastWallClockMs
+                            ? ma::formatEpochMsUtc(*a.lastWallClockMs).c_str()
+                            : "-");
+        if (!a.playlist.segments.empty()) {
+            int opened = 0;
+            for (const auto& s : a.playlist.segments) if (s.opened) ++opened;
+            std::printf("  segments    : %zu listed, %d opened, %d with PDT, "
+                        "list duration %.3f s\n",
+                        a.playlist.segments.size(), opened, a.playlist.pdtCount,
+                        a.playlist.totalDuration());
+        }
+        for (const auto& s : a.streams)
+            std::printf("  stream #%-2d  : %-8s %-8s offset=%+.1f ms "
+                        "drift=%+.1f ms/min nonmono=%d gap=%.3f s\n",
+                        s.streamIndex, ma::toString(s.kind), s.codec.c_str(),
+                        s.startOffsetMs, s.driftMsPerMin,
+                        s.nonMonotonicCount, s.maxGapSeconds);
+        for (const auto& x : a.issues)
+            std::printf("  [%s] %-26s %s\n", x.severity.c_str(), x.code.c_str(),
+                        x.message.c_str());
+    }
+    if (cmp) {
+        std::printf("comparison    : method=%s offset=%+.1f ms confidence=%.2f "
+                    "overlap=%.3f s\n",
+                    cmp->method.c_str(), cmp->offsetMs, cmp->confidence,
+                    cmp->overlapSeconds);
+        std::printf("  %s\n", cmp->note.c_str());
+    }
 }
 
 } // namespace
@@ -188,8 +239,12 @@ int main(int argc, char** argv) {
                        << " | FFmpeg=" << ma::infra::ffmpegVersionString());
     }
 
-    size_t i = 0;
-    for (; i < a.size(); ++i) {
+    // Options may appear before OR after the primary input. Tokens after the
+    // input that are not options are appended to it (unquoted Windows paths
+    // with spaces), but --compare / --anchor-ms values are consumed explicitly
+    // so they can never be swallowed into the path.
+    bool inputSeen = false;
+    for (size_t i = 0; i < a.size(); ++i) {
         const std::string& v = a[i];
         if (v == "--json") args.json = true;
         else if (v == "--frames") args.printFrames = true;
@@ -209,7 +264,16 @@ int main(int argc, char** argv) {
             args.opts.stallTimeout = std::atof(optArg(a, i).c_str());
         else if (v == "--probe-timeout")
             args.opts.probeTimeout = std::atof(optArg(a, i).c_str());
-        else if (v == "--opt") {
+        else if (v == "--no-align") args.opts.enableAlignment = false;
+        else if (v == "--compare" || v.rfind("--compare=", 0) == 0) {
+            if (v.size() > 10) args.compare = v.substr(10);
+            else if (i + 1 < a.size()) args.compare = a[++i];
+            else { std::fprintf(stderr, "--compare needs a path\n"); return 2; }
+        } else if (v == "--anchor-ms" || v.rfind("--anchor-ms=", 0) == 0) {
+            std::string value = v.size() > 12 ? v.substr(12) : std::string();
+            if (value.empty() && i + 1 < a.size()) value = a[++i];
+            args.anchorMs = std::atof(value.c_str());
+        } else if (v == "--opt") {
             std::string kv = optArg(a, i);
             auto eq = kv.find('=');
             if (eq != std::string::npos)
@@ -219,18 +283,19 @@ int main(int argc, char** argv) {
                       "[--max-frames N] [--max-decode-frames N] "
                       "[--probesize B] [--analyze-duration US] "
                       "[--connect-timeout S] [--stall-timeout S] [--probe-timeout S] "
-                      "[--opt K=V] <url|file>");
+                      "[--opt K=V] [--no-align] [--compare <file>] "
+                      "[--anchor-ms N] <url|file>");
             return 2;
         } else if (!v.empty() && v[0] == '-' && v.size() > 1) {
             std::fprintf(stderr, "unknown option: %s\n", v.c_str());
             return 2;
-        } else {
+        } else if (!inputSeen) {
             args.input = v;
-            ++i;
-            break;
+            inputSeen = true;
+        } else {
+            args.input += " " + v;
         }
     }
-    if (i < a.size()) args.input += " " + a[i]; // tolerate unquoted spaces in paths
 
     if (args.input.empty()) {
         std::fprintf(stderr, "no input url/file given (see --help)\n");
@@ -257,13 +322,34 @@ int main(int argc, char** argv) {
                     << " packets=" << outcome.value.totalPacketsRead
                     << " elapsed=" << od.elapsedSeconds);
 
+    ma::TimelineComparison comparison;
+    const ma::TimelineComparison* cmpPtr = nullptr;
+    if (!args.compare.empty()) {
+        // The second recording must always carry a timeline, even if the
+        // primary run was invoked with --no-align.
+        auto cmpOpts = args.opts;
+        cmpOpts.enableAlignment = true;
+        auto second = analyzer->analyze(args.compare, cmpOpts, &cancel, {});
+        const ma::AlignmentReport emptyA, emptyB;
+        const ma::AlignmentReport& A =
+            outcome.value.alignment ? *outcome.value.alignment : emptyA;
+        const ma::AlignmentReport& B =
+            second.value.alignment ? *second.value.alignment : emptyB;
+        comparison = ma::compareTimelines(A, B, args.anchorMs);
+        cmpPtr = &comparison;
+        MA_LOGI("cli", "compare method=" << comparison.method
+                        << " offsetMs=" << comparison.offsetMs
+                        << " confidence=" << comparison.confidence
+                        << " secondOk=" << second.ok());
+    }
+
     if (args.json)
         std::fputs(ma::core::toJson(outcome.value, outcome.diag, args.printFrames, "",
                                     ma::infra::ffmpegVersionString(),
-                                    args.printFrameLimit).c_str(),
+                                    args.printFrameLimit, cmpPtr).c_str(),
                    stdout);
     else
-        printHuman(outcome.value, outcome.diag, args);
+        printHuman(outcome.value, outcome.diag, args, cmpPtr);
 
     if (!outcome.ok()) {
         const auto& d = outcome.diag;

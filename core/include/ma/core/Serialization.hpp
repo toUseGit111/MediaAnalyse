@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "ma/core/Alignment.hpp"
 #include "ma/core/Analyzer.hpp"
 #include "ma/core/MediaInfo.hpp"
 #include "ma/core/Result.hpp"
@@ -33,12 +34,15 @@ namespace ma::core {
 std::string toJson(const AnalysisResult& r, const Diagnostic& d, bool withFrames,
                    const std::string& type = {},
                    const std::string& ffmpegVersion = {},
-                   int64_t frameLimit = 0);
+                   int64_t frameLimit = 0,
+                   const TimelineComparison* comparison = nullptr);
 
 // Parse the object produced by toJson() (tolerant of the extra "type" field and
 // of missing/empty sections). Returns false on a hard parse failure; callers
 // should treat that as an internal error rather than a media failure.
-bool fromJson(const std::string& json, AnalysisResult& r, Diagnostic& d);
+// `comparison` optionally receives the --compare result embedded by the CLI.
+bool fromJson(const std::string& json, AnalysisResult& r, Diagnostic& d,
+              TimelineComparison* comparison = nullptr);
 
 // Serialize/parse the AnalysisOptions subset that the worker understands.
 std::string toOptionsJson(const AnalysisOptions& o);

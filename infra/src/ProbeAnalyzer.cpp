@@ -2,9 +2,10 @@
 //
 // Design points that fix the legacy app's defects:
 //  * every stream is modeled (video/audio/subtitle/data/attachment), none assumed
-//  * packet-level metadata first; frame type comes from a cheap bitstream parser
-//    (no pixel decoding); decoding is opt-in, bounded, and only ADDS geometry/
-//    format extras - it never replaces a packet's timing, type or samples
+//  * packet-level metadata first; I/P/B comes from a SYNCHRONOUS read of each
+//    packet's own slice header (no FFmpeg parser, no pixel decoding, no lag);
+//    decoding is opt-in, bounded, and only ADDS geometry/format extras - it
+//    never replaces a packet's timing, type or samples
 //  * staged timeouts + cooperative cancel, no fixed 6 s kill switch
 //  * every FFmpeg error becomes a structured Diagnostic with stage + hint
 //  * frames are bounded by maxFrames instead of unbounded vectors
@@ -12,6 +13,7 @@
 
 #include <chrono>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -21,9 +23,12 @@ extern "C" {
 #include "ma/infra/Ffmpeg.hpp"
 }
 
+#include "ma/core/Alignment.hpp"
 #include "ma/core/UrlNormalizer.hpp"
+#include "ma/infra/HlsTimeline.hpp"
 #include "ma/infra/Interrupt.hpp"
 #include "ma/infra/Raii.hpp"
+#include "ma/infra/SliceType.hpp"
 
 namespace ma::infra {
 namespace {
@@ -37,6 +42,27 @@ double elapsedSince(clock::time_point t) {
 double tbToSeconds(const AVRational& tb, int64_t v) {
     if (v == AV_NOPTS_VALUE || tb.den == 0 || v == INT64_MIN) return 0.0;
     return av_q2d(tb) * static_cast<double>(v);
+}
+
+// Which bitstream syntax probeSliceType() should use. Codecs we cannot decode
+// structurally fall through to the AV_PKT_FLAG_KEY marker only.
+CodecFamily codecFamilyOf(AVCodecID id) {
+    switch (id) {
+    case AV_CODEC_ID_H264: return CodecFamily::H264;
+    case AV_CODEC_ID_HEVC: return CodecFamily::Hevc;
+    case AV_CODEC_ID_MPEG1VIDEO:
+    case AV_CODEC_ID_MPEG2VIDEO: return CodecFamily::Mpeg12;
+    case AV_CODEC_ID_MJPEG:
+    case AV_CODEC_ID_PRORES:
+    case AV_CODEC_ID_DNXHD:
+    case AV_CODEC_ID_RAWVIDEO:
+    case AV_CODEC_ID_FFV1:
+    case AV_CODEC_ID_HUFFYUV:
+    case AV_CODEC_ID_PNG:
+    case AV_CODEC_ID_JPEG2000:
+        return CodecFamily::IntraOnly;
+    default: return CodecFamily::Unknown;
+    }
 }
 
 StreamKind mapKind(AVMediaType t) {
@@ -88,13 +114,15 @@ StreamInfo describeStream(int index, const AVStream* st) {
     return s;
 }
 
-// Bitstream parsers report I/P/B/S without decoding a single pixel. This is
-// what makes frame types available in the default (fast) analysis path.
-struct ParserState {
-    ParserPtr parser;
-    CodecContextPtr ctx; // allocated but never opened; parsers read extradata
-    bool attempted = false;
-};
+// Frame types come from a SYNCHRONOUS read of each packet's own slice header
+// (SliceType.hpp), never from AVCodecParserContext or the decoder.
+// av_parser_parse2() emits the *previously* completed access unit and
+// parser->pict_type keeps its last value until a new frame is recognised, so
+// copying it onto the current packet row shifts I/P/B by one or more frames.
+// On a 1 s GOP H.264 stream that showed up as three I frames at startup and
+// two per GOP, while the real IDR packet was labelled "P". Streaming snapshots
+// make back-filling impossible: those rows are already published to the GUI.
+// AV_PKT_FLAG_KEY stays the authoritative marker for random-access points.
 
 // Frame-level extras gathered by decoding one packet. Timing, picture type and
 // sample count are deliberately NOT taken from the decoder: with B-frame
@@ -117,14 +145,14 @@ public:
     Outcome<AnalysisResult> analyze(const std::string& rawInput,
                                     const AnalysisOptions& opts,
                                     const CancelFlag* cancel,
-                                    const ProgressFn& onProgress) override {
+                                    const ProgressFn& onProgress,
+                                    const SnapshotFn& onSnapshot) override {
         initFfmpeg();
         const auto t0 = clock::now();
 
-        // A controller may reuse this analyzer for several files. Decoder and
-        // parser state is strictly per-run and must never leak across inputs.
+        // A controller may reuse this analyzer for several files. Decoder
+        // state is strictly per-run and must never leak across inputs.
         decoders_.clear();
-        parsers_.clear();
         failedDecoders_.clear();
 
         Outcome<AnalysisResult> out;
@@ -162,6 +190,15 @@ public:
         }
         guard.attach(raw);
 
+        // The io_open hook must be live BEFORE avformat_open_input(): for HLS,
+        // find_stream_info() already opens one or more segments. URLs opened
+        // during probing are replayed once the playlist has been read, so an
+        // HLS URL without a .m3u8 suffix is tracked just as well.
+        SegmentTracker tracker;
+        tracker.attach(raw);
+        ma::HlsPlaylist playlist;
+        std::string playlistError;
+
         OptionsDict dict;
         if (opts.probesize > 0)
             dict.set("probesize", std::to_string(opts.probesize));
@@ -184,6 +221,20 @@ public:
         fmt.reset(raw); // take ownership once open succeeded
         guard.onOpened();
         out.value.timings.openSeconds = elapsedSince(t0);
+
+        // A .m3u8 suffix is only a hint; the demuxer's name is authoritative.
+        // The playlist text is fetched independently through AVIO so local
+        // VOD recordings and HTTP live/VOD lists share one parser. A missing
+        // or unreadable playlist degrades to PtsOnly - it never fails the run.
+        if (opts.enableAlignment) {
+            const char* demuxer = fmt.get()->iformat ? fmt.get()->iformat->name : nullptr;
+            const bool hlsDemuxer = demuxer &&
+                std::string(demuxer).find("hls") != std::string::npos;
+            if (looksLikeHlsPlaylist(norm.url) || hlsDemuxer) {
+                playlist = loadHlsPlaylist(norm.url, &playlistError);
+                if (!playlist.empty()) tracker.setPlaylist(&playlist);
+            }
+        }
 
         if (!dict.empty())
             diag.hint = "unused options: " + summarizeDict(dict.releaseLeftovers());
@@ -220,6 +271,28 @@ public:
         for (unsigned i = 0; i < f->nb_streams; ++i)
             r.streams.push_back(describeStream(static_cast<int>(i), f->streams[i]));
 
+        // Post-demux diagnostics are pure post-processing over the stored rows;
+        // they can be produced on success, cancellation, truncation or a read
+        // error alike. `playlist` may be empty -> PtsOnly report, so non-HLS
+        // files still get A/V start offset / pts monotonicity checks.
+        auto finalizeAlignment = [&]() {
+            if (!opts.enableAlignment) return;
+            r.alignment = std::make_shared<ma::AlignmentReport>(
+                ma::computeAlignment(r, playlist));
+        };
+
+        // Publish the stream list as soon as probing is done. A live source may
+        // never reach EOF, so the UI must not wait for the final result to show
+        // what codecs/resolutions it is actually receiving. r.frames is still
+        // empty here, so header is a cheap copy of just container + streams.
+        if (onSnapshot) {
+            AnalysisSnapshot s;
+            s.hasStreams = true;
+            s.header = r;
+            s.elapsedSeconds = elapsedSince(t0);
+            onSnapshot(s);
+        }
+
         // ---- stage 4: demux loop --------------------------------------------
         PacketPtr pkt{av_packet_alloc()};
         std::map<int, std::optional<double>> lastDtsTime; // per-stream, for delta
@@ -236,12 +309,24 @@ public:
         std::map<int, int64_t> decodedPerStream;
         bool decodeLimited = false;
 
+        // Incremental publishing for live sources: emit the rows parsed since
+        // the previous snapshot. Packet count AND wall-clock are both gated so
+        // a high-rate stream cannot flood the IPC/UI, while a short local file
+        // still produces at least one batch (the first one is never delayed).
+        // Copying a slice of r.frames avoids keeping a second growing vector.
+        constexpr int64_t kSnapshotPackets = 128;
+        constexpr double kSnapshotMinSeconds = 0.25;
+        size_t snapshotCursor = r.frames.size();
+        int64_t lastSnapshotPackets = 0;
+        double lastSnapshotAt = -1.0;
+
         const auto tDemux = clock::now();
         while (true) {
             if (cancel && cancel->load(std::memory_order_relaxed)) {
                 finishCancelled(diag, norm.url, t0, r, packets);
                 out.value.timings.demuxSeconds = elapsedSince(tDemux);
                 stampTotal();
+                finalizeAlignment();
                 return out;
             }
             if (static_cast<int64_t>(r.frames.size()) >= opts.maxFrames) {
@@ -259,6 +344,7 @@ public:
                     // result being complete.
                     if (cancel && cancel->load(std::memory_order_relaxed)) {
                         finishCancelled(diag, norm.url, t0, r, packets);
+                        finalizeAlignment();
                         return out;
                     }
                     break; // clean end
@@ -276,6 +362,7 @@ public:
                 diag.elapsedSeconds = elapsedSince(t0);
                 out.value.timings.demuxSeconds = elapsedSince(tDemux);
                 stampTotal();
+                finalizeAlignment();
                 return out;
             }
 
@@ -293,16 +380,33 @@ public:
                     : std::optional<double>{tbToSeconds(tb, pkt->dts)};
 
             FrameRecord rec = packetToRecord(pkt.get(), st, seq + 1);
-
-            // Cheap I/P/B detection: no pixel decoding, works for H.264/H.265,
-            // MPEG-1/2/4, VP9, AV1, ... Falls back to the keyframe marker.
-            if (par->codec_type == AVMEDIA_TYPE_VIDEO) {
-                if (auto type = probeVideoType(f, pkt.get())) rec.pictType = *type;
-            }
+            // One row per packet. pictType is derived inside packetToRecord
+            // from THIS packet's own slice header, so it is final the moment
+            // the row (and any live snapshot carrying it) is published.
 
             if (dtsTime && lastDtsTime[pkt->stream_index])
                 rec.dtsDelta = *dtsTime - *lastDtsTime[pkt->stream_index];
             lastDtsTime[pkt->stream_index] = dtsTime;
+
+            // Segment ownership comes from FFmpeg's io_open hook, never from a
+            // pts projection: a pts guess breaks exactly on the discontinuity
+            // and missing-segment cases this feature exists to find. PDT is
+            // optional - wallClockMs simply stays unset when it is absent.
+            if (opts.enableAlignment && !playlist.empty()) {
+                const int segIdx = tracker.currentSegment();
+                if (segIdx >= 0 &&
+                    segIdx < static_cast<int>(playlist.segments.size()))
+                    rec.segmentIndex = segIdx;
+                tracker.onPacket(rec.streamIndex, rec.ptsTime, rec.dtsTime);
+                if (rec.segmentIndex >= 0) {
+                    const auto& seg =
+                        playlist.segments[static_cast<size_t>(rec.segmentIndex)];
+                    if (seg.pdtMs && rec.ptsTime && seg.firstPtsSeconds)
+                        rec.wallClockMs = *seg.pdtMs +
+                            static_cast<int64_t>(
+                                (*rec.ptsTime - *seg.firstPtsSeconds) * 1000.0);
+                }
+            }
 
             const bool decodable =
                 par->codec_type == AVMEDIA_TYPE_VIDEO ||
@@ -336,9 +440,26 @@ public:
             // mismatch, and the table shape never depends on decodeFrames.
             r.frames.push_back(std::move(rec));
             ++seq;
+
+            if (onSnapshot && packets - lastSnapshotPackets >= kSnapshotPackets) {
+                const double now = elapsedSince(t0);
+                if (lastSnapshotAt < 0.0 ||
+                    now - lastSnapshotAt >= kSnapshotMinSeconds) {
+                    AnalysisSnapshot s;
+                    s.packetsRead = packets;
+                    s.elapsedSeconds = now;
+                    for (size_t i = snapshotCursor; i < r.frames.size(); ++i)
+                        s.newFrames.push_back(r.frames[i]);
+                    snapshotCursor = r.frames.size();
+                    lastSnapshotPackets = packets;
+                    lastSnapshotAt = now;
+                    onSnapshot(s);
+                }
+            }
         }
 
         r.totalPacketsRead = packets;
+        finalizeAlignment();
 
         // Drain decoders at EOF. B-frame reordering keeps a few frames buffered
         // inside the decoder; without this flush the tail is silently lost and
@@ -405,8 +526,11 @@ private:
         r.totalPacketsRead = packets;
     }
 
-    // Packet-level row. Fills sample count for audio and a keyframe-based
-    // "I" for video even when no decoder/parser is available.
+    // Packet-level row. Fills sample count for audio and I/P/B for video by
+    // reading this packet's own slice header synchronously. No AVCodecParser
+    // and no decoder output: both lag the packet and would mislabel the row
+    // (the "3 I at startup / 2 per GOP" bug). AV_PKT_FLAG_KEY remains an
+    // authoritative override for random-access points.
     static FrameRecord packetToRecord(const AVPacket* pkt, const AVStream* st,
                                       int64_t seq) {
         FrameRecord rec;
@@ -433,41 +557,18 @@ private:
             const int64_t n = av_rescale_q(pkt->duration, tb, sampleTb);
             if (n > 0) rec.samples = n;
         }
-        if (par->codec_type == AVMEDIA_TYPE_VIDEO && rec.keyframe)
-            rec.pictType = std::string("I");
-        return rec;
-    }
-
-    std::optional<std::string> probeVideoType(AVFormatContext* f, AVPacket* pkt) {
-        const int idx = pkt->stream_index;
-        ParserState& ps = parsers_[idx];
-        if (!ps.attempted) {
-            ps.attempted = true;
-            const AVCodecParameters* par = f->streams[idx]->codecpar;
-            if (AVCodecParserContext* p = av_parser_init(par->codec_id)) {
-                ps.parser.reset(p);
-                if (AVCodecContext* c = avcodec_alloc_context3(nullptr)) {
-                    ps.ctx.reset(c);
-                    avcodec_parameters_to_context(c, par);
-                }
-            }
-            // A parser needs a codec context for extradata; without one, skip.
-            if (!ps.ctx) ps.parser.reset();
+        if (par->codec_type == AVMEDIA_TYPE_VIDEO) {
+            const size_t packetSize =
+                pkt->size > 0 ? static_cast<size_t>(pkt->size) : 0;
+            if (auto t = probeSliceType(codecFamilyOf(par->codec_id),
+                                        pkt->data, packetSize))
+                rec.pictType = *t;
+            // A demuxer-flagged IDR must never be labelled P/B because of a
+            // bitstream quirk, and codecs whose slice header we cannot parse
+            // still get an honest "I" for their key frames.
+            if (rec.keyframe) rec.pictType = std::string("I");
         }
-        if (!ps.parser) return std::nullopt;
-
-        uint8_t* out = nullptr;
-        int outSize = 0;
-        const int used = av_parser_parse2(ps.parser.get(), ps.ctx.get(),
-                                          &out, &outSize,
-                                          pkt->data, pkt->size,
-                                          pkt->pts, pkt->dts, pkt->pos);
-        if (used < 0) return std::nullopt;
-        const int pt = ps.parser->pict_type;
-        if (pt == AV_PICTURE_TYPE_NONE) return std::nullopt;
-        const char c = av_get_picture_type_char(static_cast<AVPictureType>(pt));
-        if (!c || c == '?') return std::nullopt;
-        return std::string(1, c);
+        return rec;
     }
 
     Diagnostic failureAfterInterrupt(const InterruptGuard& guard, Stage stage,
@@ -582,7 +683,6 @@ private:
     }
 
     std::map<int, CodecContextPtr> decoders_;
-    std::map<int, ParserState> parsers_;
     std::set<int> failedDecoders_;
 };
 

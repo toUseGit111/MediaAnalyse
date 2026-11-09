@@ -118,6 +118,8 @@ Item {
                         : false
                     readonly property string value: model.display !== undefined
                         ? model.display : ""
+                    // I/P/B comes from the packet's own slice header (synchronous),
+                    // so every recognised video row gets a chip.
                     readonly property bool chip: column === root.ctl.typeColumn(root.isVideo) &&
                         (value === "I" || value === "P" || value === "B")
                     readonly property color chipInk: value === "I" ? Theme.accent

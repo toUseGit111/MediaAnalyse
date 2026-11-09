@@ -38,7 +38,7 @@ public:
         ColPtsTime,
         ColDuration,
         ColSize,
-        ColType,             // I / P / B / S ... (video only)
+        ColType,             // I/P/B from packet slice header, "-" if unknown (video only)
         ColSamples,          // audio only
         ColDims,             // "WxH" - video, decode-only
         ColFormat,           // pix_fmt / sample_fmt - decode-only
@@ -52,6 +52,11 @@ public:
     void setKind(bool isVideo) { isVideo_ = isVideo; }
 
     void reset(const std::vector<ma::FrameRecord>* frames);
+    // The backing vector was appended to by the controller. Notify views with
+    // a proper row insertion instead of resetting the whole model (a live
+    // stream can grow to maxFrames rows). With an active filter the visible
+    // mapping is rebuilt, which requires a reset instead.
+    void rowsAppended(int oldVisibleCount);
     void setFilter(const QString& text);
     QString filter() const { return filter_; }
 
@@ -150,9 +155,16 @@ signals:
     // a status-state change - never as a modal error dialog.
     void analysisFailed(const QVariantMap& diagnostic);
     void progressUpdated(int64_t packetsRead, double elapsedSeconds);
+    // Incremental view of a still-running analysis (live stream). `streams` is
+    // non-empty only on the first snapshot; QML must NOT reset selection,
+    // filter or scroll position when handling this signal.
+    void liveUpdated(const QVariantMap& summary, const QVariantList& streams);
 
 private:
     void finishWith(ma::Outcome<ma::AnalysisResult> outcome);
+    void handleLiveStreams(ma::AnalysisResult& r);
+    void handleLiveFrames(ma::AnalysisResult& r);
+    QVariantMap liveSummary(bool withStreamCount = false) const;
 
     // ---- out-of-process analysis (P2: worker isolation) ----
     void launchWorker(const std::string& req);
@@ -173,6 +185,17 @@ private:
     int progressLogTick_ = 0;        // throttle progress log lines
     QString workerPath_;             // path to analyzer-worker.exe
     QString lastDumpPath_;           // dump reported by the worker on stderr
+
+    // ---- live incremental publishing (worker "streams"/"frames" lines) ----
+    ma::AnalysisResult liveHeader_;             // container + stream list
+    std::vector<ma::StreamInfo> liveStreams_;   // kind lookup for new rows
+    QVariantList liveStreamVariants_;
+    bool liveFramesStarted_ = false;            // first batch replaces old rows
+    int64_t livePackets_ = 0;
+    double liveElapsed_ = 0.0;
+    int64_t liveKeyFrames_ = 0;
+    int64_t liveDecodedRows_ = 0;
+    int snapshotLogTick_ = 0;
 
     std::vector<ma::FrameRecord> frameStore_; // owned, models point into it
     std::vector<ma::FrameRecord> videoRows_;  // per-kind splits (owned)

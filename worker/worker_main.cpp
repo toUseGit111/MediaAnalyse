@@ -4,7 +4,13 @@
 //   GUI -> worker : {"type":"analyze","input":"...","options":{...}}
 //   GUI -> worker : {"type":"cancel"}            (any time after the request)
 //   worker -> GUI : {"type":"progress","packetsRead":N,"elapsed":T}   (streamed)
+//   worker -> GUI : {"type":"streams",<toJson body, no frames>}       (after probe)
+//   worker -> GUI : {"type":"frames",<toJson body, batch only>}       (streamed)
 //   worker -> GUI : {"type":"result",<toJson body>}                    (final)
+//
+// The two snapshot lines exist because a live stream has no EOF: without them
+// the GUI would show zero streams/zero rows until the user presses Stop. They
+// reuse the exact same toJson()/fromJson() wire format as the final result.
 //
 // Because the kernel (FFmpeg + decoders) runs here and not in the GUI, any fault
 // takes down only this process; the GUI keeps the scene, grabs the minidump and
@@ -104,9 +110,38 @@ int main() {
                  std::to_string(p.elapsedSeconds) + "}");
     };
 
+    // Snapshot lines are additive: the GUI keeps rendering live rows while the
+    // worker is still reading, and the final "result" line still carries the
+    // canonical complete result. A Diagnostic with Errc::Ok keeps toJson()'s
+    // "ok":true contract without inventing a new envelope format.
+    ma::Diagnostic okDiag;
+    okDiag.code = ma::Errc::Ok;
+    okDiag.stage = ma::Stage::None;
+    int snapshotLogTick = 0;
+    ma::SnapshotFn snapshot = [&](const ma::AnalysisSnapshot& s) {
+        if (s.hasStreams) {
+            emitLine(ma::core::toJson(s.header, okDiag, /*withFrames=*/false,
+                                      "streams"));
+            MA_LOGI("worker", "streams snapshot streams="
+                                  << s.header.streams.size());
+        }
+        if (!s.newFrames.empty()) {
+            ma::AnalysisResult batch;
+            batch.frames = s.newFrames;
+            batch.totalPacketsRead = s.packetsRead;
+            batch.timings.totalSeconds = s.elapsedSeconds;
+            emitLine(ma::core::toJson(batch, okDiag, /*withFrames=*/true,
+                                      "frames"));
+            if (++snapshotLogTick % 25 == 1)
+                MA_LOGD("worker", "frames snapshot rows="
+                                      << s.newFrames.size()
+                                      << " packets=" << s.packetsRead);
+        }
+    };
+
     ma::Outcome<ma::AnalysisResult> outcome;
     try {
-        outcome = analyzer->analyze(input, opts, &cancel, progress);
+        outcome = analyzer->analyze(input, opts, &cancel, progress, snapshot);
     } catch (const std::exception& e) {
         outcome.diag.code = ma::Errc::Internal;
         outcome.diag.stage = ma::Stage::Read;

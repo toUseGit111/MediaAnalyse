@@ -126,6 +126,16 @@ def main():
             print(f"FAIL: GUI died (exit {p.returncode}) after worker finished")
             return 1
 
+        # The GUI must consume the worker's incremental snapshots. Before the
+        # live-stream fix data was published only in finishWith(), so a source
+        # without EOF showed zero streams / zero rows while packets kept coming.
+        txt = new_log_text()
+        if "live streams snapshot" not in txt or "live frames batch" not in txt:
+            print("FAIL: GUI did not consume worker streams/frames snapshots")
+            p.terminate()
+            return 1
+        print("OK: GUI consumed live streams/frames snapshots")
+
         # No crash dump expected for a good file.
         crashes = os.path.join(app_dir, "crashes")
         dumps = []

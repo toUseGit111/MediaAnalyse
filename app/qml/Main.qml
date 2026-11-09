@@ -6,7 +6,8 @@ import MediaAnalyse
 /*
  * PRISM - "precision instrument" UI port for Qt Quick.
  * Reference: media-analyzer-redesign/design-preview.html + qt-preview*.png
- * Reading order: APP BAR > SOURCE > OVERVIEW > NOTICE > STREAMS >
+ * Reading order: APP BAR > SOURCE > SUMMARY (one collapsible group holding
+ *                OVERVIEW + STREAMS; NOTICE stays always visible) >
  *                TOOLBAR > DATAVIEW > STATUS.
  *
  * Functional invariants carried over from the previous UI:
@@ -31,10 +32,33 @@ ApplicationWindow {
     property int tabIndex: 0
     property var streamList: []
     property var summary: ({})
+    // HLS timeline / A-V alignment report, filled only by a finished result.
+    // Live snapshots deliberately leave it empty, so the card stays hidden
+    // until there is a complete timeline to judge.
+    property var alignment: (root.summary && root.summary.alignment)
+                            ? root.summary.alignment : ({})
     property var errorDiag: ({})
     property bool noticeDismissed: false
     property bool decodeOn: false
     property string filterText: ""
+    // Once the user toggles the SUMMARY panel by hand, automatic
+    // small-window folding stops overriding their choice.
+    property bool summaryUserSet: false
+    // Digest printed on the collapsed header so folding the detail area never
+    // hides the essential state (source / stream count / packets).
+    property string summaryDigest: {
+        var s = root.summary || ({})
+        var src = root.isUrlMode
+            ? (root.proto.ok ? root.proto.name : "网络流")
+            : (s.formatName ? root.shortFormat(s.formatName) : "本地文件")
+        return src + " · " + root.streamList.length + " 条流 · " +
+               root.group(s.totalPackets || 0) + " 包"
+    }
+
+    function toggleSummary() {
+        summaryPanel.expanded = !summaryPanel.expanded
+        root.summaryUserSet = true
+    }
     property var proto: root.isUrlMode ? root.detectProto(urlField.text)
                                        : { name: "", rule: "", ok: false, empty: true }
 
@@ -826,132 +850,443 @@ ApplicationWindow {
                 }
             }
 
-            // 03 OVERVIEW
-            SectionHead { label: "OVERVIEW / 概览"; tail: root.overviewTail; tailColor: root.overviewColor }
-
-            Rectangle {
+            // 03+05 SUMMARY / 概览与流信息 —— 同一个可折叠分组。
+            // 收起后 DATAVIEW (Layout.fillHeight) 自动占满腾出的高度，
+            // 小窗口下帧表不再被指标条 / 流卡片挤到只剩几行。
+            ColumnLayout {
+                id: summaryPanel
                 Layout.fillWidth: true
-                Layout.preferredHeight: 82
-                color: Theme.sunken
-                radius: 8
-                border.color: Theme.line
-                border.width: 1
-                RowLayout {
-                    anchors.fill: parent
-                    spacing: 0
-                    MetricCell {
-                        label: root.metrics[0].label; value: root.metrics[0].value
-                        unit: root.metrics[0].unit; note: root.metrics[0].note
-                        accent: root.metrics[0].accent; live: root.metrics[0].live
-                        fontSize: root.metrics[0].size
-                    }
-                    MetricCell {
-                        label: root.metrics[1].label; value: root.metrics[1].value
-                        unit: root.metrics[1].unit; note: root.metrics[1].note
-                        accent: root.metrics[1].accent; live: root.metrics[1].live
-                        fontSize: root.metrics[1].size
-                    }
-                    MetricCell {
-                        label: root.metrics[2].label; value: root.metrics[2].value
-                        unit: root.metrics[2].unit; note: root.metrics[2].note
-                        accent: root.metrics[2].accent; live: root.metrics[2].live
-                        fontSize: root.metrics[2].size
-                    }
-                    MetricCell {
-                        label: root.metrics[3].label; value: root.metrics[3].value
-                        unit: root.metrics[3].unit; note: root.metrics[3].note
-                        accent: root.metrics[3].accent; live: root.metrics[3].live
-                        fontSize: root.metrics[3].size
-                    }
-                    MetricCell {
-                        divider: false
-                        label: root.metrics[4].label; value: root.metrics[4].value
-                        unit: root.metrics[4].unit; note: root.metrics[4].note
-                        accent: root.metrics[4].accent; live: root.metrics[4].live
-                        fontSize: root.metrics[4].size
+                spacing: 12
+                property bool expanded: true
+
+                Component.onCompleted: {
+                    if (root.height < 780) summaryPanel.expanded = false
+                }
+                // Until the user toggles by hand, keep auto-folding on small
+                // windows so the frame table always has room.
+                Connections {
+                    target: root
+                    function onHeightChanged() {
+                        if (!root.summaryUserSet)
+                            summaryPanel.expanded = root.height >= 780
                     }
                 }
-            }
 
-            // 04 NOTICE
-            Rectangle {
-                visible: root.noticeVisible
-                Layout.fillWidth: true
-                Layout.preferredHeight: 38
-                radius: 6
-                color: root.noticeBg
-                border.color: root.noticeEdge
-                border.width: 1
+                // 折叠头：整行可点击；收起时仍显示来源 / 流数 / 包数摘要
                 Rectangle {
-                    anchors.left: parent.left; anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    width: 3
-                    color: root.noticeLeft
-                }
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 12
-                    anchors.rightMargin: 8
-                    spacing: 9
-                    Text {
-                        text: "▲"
-                        color: root.noticeBold
-                        font.pixelSize: 12
-                        Layout.alignment: Qt.AlignVCenter
-                    }
-                    Text {
-                        Layout.fillWidth: true
-                        text: "<b>" + root.notice.title + "</b> · " + root.notice.body
-                        textFormat: Text.RichText
-                        color: root.noticeInk
-                        font.family: Theme.uiFont
-                        font.pixelSize: 12
-                        elide: Text.ElideRight
-                        verticalAlignment: Text.AlignVCenter
-                    }
-                    PrismButton {
-                        text: "详情"
-                        variant: "ghost"; compact: true
-                        onClicked: root.showToast(root.notice.detail)
-                    }
-                    PrismButton {
-                        text: "×"
-                        variant: "ghost"; compact: true
-                        onClicked: root.noticeDismissed = true
-                    }
-                }
-            }
-
-            // 05 STREAMS
-            SectionHead { label: "STREAMS / 流信息"; tail: root.streamList.length + " 条流" }
-
-            Item {
-                Layout.fillWidth: true
-                Layout.preferredHeight: Math.max(102, Math.min(226, cardFlow.implicitHeight))
-                Flow {
-                    id: cardFlow
-                    width: parent.width
-                    spacing: 12
-                    Repeater {
-                        model: root.streamList
-                        StreamCard {
-                            width: (cardFlow.width - 12) / 2
-                            stream: modelData
+                    id: summaryHeader
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 34
+                    radius: 6
+                    color: headerMouse.containsMouse ? Theme.surface2 : Theme.sunken
+                    border.color: headerMouse.containsMouse ? Theme.line2 : Theme.line
+                    border.width: 1
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: 9
+                        Text {
+                            text: summaryPanel.expanded ? "▾" : "▸"
+                            color: Theme.accent
+                            font.pixelSize: 12
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+                        Text {
+                            text: "SUMMARY / 概览与流信息"
+                            color: Theme.text2
+                            font.family: Theme.uiFont
+                            font.pixelSize: 10
+                            font.bold: true
+                            font.letterSpacing: 1.4
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 1
+                            Layout.alignment: Qt.AlignVCenter
+                            color: Theme.line
+                        }
+                        Text {
+                            visible: !summaryPanel.expanded
+                            text: root.summaryDigest
+                            color: Theme.text3
+                            font.family: Theme.monoFont
+                            font.pixelSize: 11
+                            elide: Text.ElideRight
+                            Layout.maximumWidth: 420
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+                        Text {
+                            visible: summaryPanel.expanded
+                            text: root.streamList.length + " 条流"
+                            color: Theme.text4
+                            font.family: Theme.uiFont
+                            font.pixelSize: 11
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+                        Text {
+                            text: summaryPanel.expanded ? "收起" : "展开"
+                            color: Theme.accent
+                            font.family: Theme.uiFont
+                            font.pixelSize: 11
+                            Layout.alignment: Qt.AlignVCenter
                         }
                     }
-                    Text {
-                        visible: root.streamList.length === 0
-                        width: cardFlow.width
-                        height: 102
-                        text: "尚无流信息 · 解析后将在此显示每条流的编码、分辨率、采样率与时基"
-                        color: Theme.text4
-                        font.family: Theme.uiFont
-                        font.pixelSize: 12
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
+                    MouseArea {
+                        id: headerMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            root.toggleSummary()
+                            console.log("[SUMMARY] expanded=" + summaryPanel.expanded)
+                        }
                     }
                 }
-            }
+
+                // OVERVIEW 内容（随分组一起折叠）
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    visible: summaryPanel.expanded
+                    spacing: 12
+                    SectionHead {
+                        label: "OVERVIEW / 概览"
+                        tail: root.overviewTail
+                        tailColor: root.overviewColor
+                    }
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 82
+                        color: Theme.sunken
+                        radius: 8
+                        border.color: Theme.line
+                        border.width: 1
+                        RowLayout {
+                            anchors.fill: parent
+                            spacing: 0
+                            MetricCell {
+                                label: root.metrics[0].label; value: root.metrics[0].value
+                                unit: root.metrics[0].unit; note: root.metrics[0].note
+                                accent: root.metrics[0].accent; live: root.metrics[0].live
+                                fontSize: root.metrics[0].size
+                            }
+                            MetricCell {
+                                label: root.metrics[1].label; value: root.metrics[1].value
+                                unit: root.metrics[1].unit; note: root.metrics[1].note
+                                accent: root.metrics[1].accent; live: root.metrics[1].live
+                                fontSize: root.metrics[1].size
+                            }
+                            MetricCell {
+                                label: root.metrics[2].label; value: root.metrics[2].value
+                                unit: root.metrics[2].unit; note: root.metrics[2].note
+                                accent: root.metrics[2].accent; live: root.metrics[2].live
+                                fontSize: root.metrics[2].size
+                            }
+                            MetricCell {
+                                label: root.metrics[3].label; value: root.metrics[3].value
+                                unit: root.metrics[3].unit; note: root.metrics[3].note
+                                accent: root.metrics[3].accent; live: root.metrics[3].live
+                                fontSize: root.metrics[3].size
+                            }
+                            MetricCell {
+                                divider: false
+                                label: root.metrics[4].label; value: root.metrics[4].value
+                                unit: root.metrics[4].unit; note: root.metrics[4].note
+                                accent: root.metrics[4].accent; live: root.metrics[4].live
+                                fontSize: root.metrics[4].size
+                            }
+                        }
+                    }
+                }
+
+                // 04 NOTICE —— 常显，不随折叠隐藏：警告 / 错误 / 停止提示
+                // 属于全局状态，收起概览时仍必须可见。
+                Rectangle {
+                    visible: root.noticeVisible
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 38
+                    radius: 6
+                    color: root.noticeBg
+                    border.color: root.noticeEdge
+                    border.width: 1
+                    Rectangle {
+                        anchors.left: parent.left; anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: 3
+                        color: root.noticeLeft
+                    }
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 8
+                        spacing: 9
+                        Text {
+                            text: "▲"
+                            color: root.noticeBold
+                            font.pixelSize: 12
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: "<b>" + root.notice.title + "</b> · " + root.notice.body
+                            textFormat: Text.RichText
+                            color: root.noticeInk
+                            font.family: Theme.uiFont
+                            font.pixelSize: 12
+                            elide: Text.ElideRight
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        PrismButton {
+                            text: "详情"
+                            variant: "ghost"; compact: true
+                            onClicked: root.showToast(root.notice.detail)
+                        }
+                        PrismButton {
+                            text: "×"
+                            variant: "ghost"; compact: true
+                            onClicked: root.noticeDismissed = true
+                        }
+                    }
+                }
+
+                // STREAMS 内容（随同一个分组折叠）
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    visible: summaryPanel.expanded
+                    spacing: 12
+                    SectionHead {
+                        label: "STREAMS / 流信息"
+                        tail: root.streamList.length + " 条流"
+                    }
+                    Item {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Math.max(102, Math.min(226, cardFlow.implicitHeight))
+                        Flow {
+                            id: cardFlow
+                            width: parent.width
+                            spacing: 12
+                            Repeater {
+                                model: root.streamList
+                                StreamCard {
+                                    width: (cardFlow.width - 12) / 2
+                                    stream: modelData
+                                }
+                            }
+                            Text {
+                                visible: root.streamList.length === 0
+                                width: cardFlow.width
+                                height: 102
+                                text: "尚无流信息 · 解析后将在此显示每条流的编码、分辨率、采样率与时基"
+                                color: Theme.text4
+                                font.family: Theme.uiFont
+                                font.pixelSize: 12
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                        }
+                    }
+                }
+
+                // ALIGNMENT / 对齐诊断 —— 与概览、流信息同属一个可折叠分组。
+                // PDT 是可选锚点：有则用绝对墙上时钟，无则明确显示「相对」。
+                ColumnLayout {
+                    id: alignmentPanel
+                    Layout.fillWidth: true
+                    visible: summaryPanel.expanded &&
+                             root.alignment.timeline !== undefined &&
+                             root.alignment.timeline !== ""
+                    spacing: 8
+                    // Details start collapsed: a full diagnostic card would
+                    // push the frame table out of view on a small window, which
+                    // is exactly what the SUMMARY folding feature is for.
+                    property bool alignExpanded: false
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 34
+                        radius: 6
+                        color: alignHeadMouse.containsMouse ? Theme.surface2 : Theme.sunken
+                        border.color: alignHeadMouse.containsMouse ? Theme.line2 : Theme.line
+                        border.width: 1
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 12
+                            spacing: 9
+                            Text {
+                                text: alignmentPanel.alignExpanded ? "▾" : "▸"
+                                color: Theme.accent
+                                font.pixelSize: 12
+                                Layout.alignment: Qt.AlignVCenter
+                            }
+                            Text {
+                                text: "ALIGNMENT / 对齐诊断"
+                                color: Theme.text2
+                                font.family: Theme.uiFont
+                                font.pixelSize: 10
+                                font.bold: true
+                                font.letterSpacing: 1.4
+                                Layout.alignment: Qt.AlignVCenter
+                            }
+                            Text {
+                                text: (root.alignment.timeline || "-") + " · " +
+                                      (root.alignment.crossFile ? "PDT 绝对时钟" : "相对时间轴")
+                                color: root.alignment.crossFile ? Theme.success : Theme.accent
+                                font.family: Theme.monoFont
+                                font.pixelSize: 11
+                                Layout.alignment: Qt.AlignVCenter
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 1
+                                Layout.alignment: Qt.AlignVCenter
+                                color: Theme.line
+                            }
+                            Text {
+                                text: (root.alignment.errorCount || 0) + " 错误 · " +
+                                      (root.alignment.warningCount || 0) + " 警告"
+                                color: (root.alignment.errorCount || 0) > 0
+                                       ? Theme.error : Theme.text3
+                                font.family: Theme.uiFont
+                                font.pixelSize: 11
+                                Layout.alignment: Qt.AlignVCenter
+                            }
+                        }
+                        MouseArea {
+                            id: alignHeadMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: alignmentPanel.alignExpanded =
+                                       !alignmentPanel.alignExpanded
+                        }
+                    }
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        visible: alignmentPanel.alignExpanded
+                        spacing: 8
+                        Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: alignBody.implicitHeight + 20
+                        color: Theme.sunken
+                        radius: 8
+                        border.color: Theme.line
+                        border.width: 1
+                        ColumnLayout {
+                            id: alignBody
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.margins: 10
+                            spacing: 6
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 14
+                                Text {
+                                    text: "时间基准  " + (root.alignment.timeline || "-")
+                                    color: Theme.text1
+                                    font.family: Theme.monoFont
+                                    font.pixelSize: 11
+                                }
+                                Text {
+                                    text: "跨文件对齐  " +
+                                          (root.alignment.crossFile ? "可 · PDT 绝对时钟"
+                                                                    : "不可 · 相对时间轴")
+                                    color: root.alignment.crossFile ? Theme.success
+                                                                    : Theme.accent
+                                    font.family: Theme.uiFont
+                                    font.pixelSize: 11
+                                }
+                                Text {
+                                    text: "覆盖  " +
+                                          Number(root.alignment.coveredSeconds || 0).toFixed(3) + " s"
+                                    color: Theme.text3
+                                    font.family: Theme.monoFont
+                                    font.pixelSize: 11
+                                }
+                                Item { Layout.fillWidth: true }
+                                Text {
+                                    text: "分片 " + (root.alignment.segmentCount || 0) +
+                                          " · PDT " + (root.alignment.pdtCount || 0)
+                                    color: Theme.text3
+                                    font.family: Theme.monoFont
+                                    font.pixelSize: 11
+                                }
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                visible: (root.alignment.firstWallClock || "").length > 0
+                                text: "墙上时钟  " + (root.alignment.firstWallClock || "") +
+                                      " → " + (root.alignment.lastWallClock || "")
+                                color: Theme.video
+                                font.family: Theme.monoFont
+                                font.pixelSize: 11
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: root.alignment.note || ""
+                                color: Theme.text3
+                                font.family: Theme.uiFont
+                                font.pixelSize: 11
+                                wrapMode: Text.WordWrap
+                            }
+                            Repeater {
+                                model: root.alignment.streams || []
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: "流 #" + modelData.stream + " (" + modelData.kind +
+                                          ")  起始偏移 " +
+                                          Number(modelData.startOffsetMs || 0).toFixed(1) +
+                                          " ms · 时钟漂移 " +
+                                          Number(modelData.driftMsPerMin || 0).toFixed(1) +
+                                          " ms/min · 最大空档 " +
+                                          Number(modelData.maxGapSeconds || 0).toFixed(3) + " s"
+                                    color: Theme.text2
+                                    font.family: Theme.monoFont
+                                    font.pixelSize: 11
+                                }
+                            }
+                            Repeater {
+                                model: Math.min(6, (root.alignment.issues || []).length)
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Text {
+                                        text: "[" + root.alignment.issues[index].severity + "] " +
+                                              root.alignment.issues[index].code
+                                        color: root.alignment.issues[index].severity === "error"
+                                               ? Theme.error
+                                               : (root.alignment.issues[index].severity === "warning"
+                                                  ? Theme.accent : Theme.text3)
+                                        font.family: Theme.monoFont
+                                        font.pixelSize: 11
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: root.alignment.issues[index].message
+                                        color: Theme.text2
+                                        font.family: Theme.uiFont
+                                        font.pixelSize: 11
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                visible: (root.alignment.issues || []).length === 0
+                                text: "未发现分片缺失、未标注的不连续点或明显音画偏移"
+                                color: Theme.success
+                                font.family: Theme.uiFont
+                                font.pixelSize: 11
+                            }
+                        }
+                        } // details card
+                    } // details ColumnLayout
+                } // alignmentPanel
+            } // summaryPanel
         }
 
         // ---------- 06 TOOLBAR (full bleed) ----------
@@ -1145,6 +1480,16 @@ ApplicationWindow {
         onActivated: root.copySelection()
     }
 
+    // Keyboard equivalent of clicking the SUMMARY header. Handy when the
+    // window is small and the frame table needs the vertical space back.
+    Shortcut {
+        sequence: "Ctrl+Shift+S"
+        onActivated: {
+            root.toggleSummary()
+            console.log("[SUMMARY] expanded=" + summaryPanel.expanded)
+        }
+    }
+
     Timer {
         id: filterTimer
         interval: 180
@@ -1303,6 +1648,15 @@ ApplicationWindow {
 
     Connections {
         target: Analysis
+        // Live sources have no EOF: the worker publishes the stream list after
+        // probing and keeps appending frame batches. Unlike a finished result,
+        // this must NOT clear the selection, filter or scroll position - the
+        // user is watching a growing table while it is being filled.
+        function onLiveUpdated(summary, streams) {
+            root.summary = summary
+            if (summary.streamCount !== undefined)
+                root.streamList = streams
+        }
         function onAnalysisSucceeded(summary, streams) {
             root.resetSelection()
             root.filterText = ""

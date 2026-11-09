@@ -23,9 +23,6 @@ struct FfmpegDeleters {
     void operator()(AVDictionary* p) const noexcept {
         if (p) av_dict_free(&p);
     }
-    void operator()(AVCodecParserContext* p) const noexcept {
-        if (p) av_parser_close(p);
-    }
     void operator()(AVIOContext* p) const noexcept {
         // Note: only for contexts we own the buffer of; not used yet.
         (void)p;
@@ -37,7 +34,6 @@ using CodecContextPtr   = std::unique_ptr<AVCodecContext, FfmpegDeleters>;
 using PacketPtr         = std::unique_ptr<AVPacket, FfmpegDeleters>;
 using FramePtr          = std::unique_ptr<AVFrame, FfmpegDeleters>;
 using DictionaryPtr     = std::unique_ptr<AVDictionary, FfmpegDeleters>;
-using ParserPtr         = std::unique_ptr<AVCodecParserContext, FfmpegDeleters>;
 
 // AVFormatContext needs special open semantics; wrap manually.
 class OpenFormatContext {

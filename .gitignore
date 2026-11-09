@@ -12,6 +12,9 @@ compile_commands.json
 crashes/
 *.dmp
 
+# --- fuzz 每次运行写出的临时报告（正式报告放 docs/verification/） ---
+fuzz_report.json
+
 # --- Transient logs ---
 # Runtime logs live in <build>/logs and <dist>/logs; both parents are ignored.
 *.log

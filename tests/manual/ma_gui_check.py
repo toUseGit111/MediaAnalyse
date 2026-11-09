@@ -267,7 +267,7 @@ def read_clipboard():
 def post_key(hwnd, combo):
     keys = combo.lower().split("+")
     codes = {"ctrl": 0x11, "shift": 0x10, "c": 0x43, "a": 0x41,
-             "v": 0x56, "enter": 0x0D, "esc": 0x1B}
+             "v": 0x56, "s": 0x53, "enter": 0x0D, "esc": 0x1B}
     seq = [codes[k] for k in keys if k in codes]
     user32.SendMessageW.argtypes = [wt.HWND, ctypes.c_uint, wt.WPARAM, wt.LPARAM]
     for c in seq:
@@ -279,7 +279,7 @@ def post_key(hwnd, combo):
 def key(combo):
     keys = combo.lower().split("+")
     codes = {"ctrl": 0x11, "shift": 0x10, "alt": 0x12, "enter": 0x0D,
-             "esc": 0x1B, "c": 0x43, "a": 0x41, "v": 0x56}
+             "esc": 0x1B, "c": 0x43, "a": 0x41, "v": 0x56, "s": 0x53}
     down = [codes[k] for k in keys if k in codes]
     for c in down:
         user32.keybd_event(c, 0, 0, 0)

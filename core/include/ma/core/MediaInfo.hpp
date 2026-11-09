@@ -3,11 +3,16 @@
 // The data model supports ANY number of streams of ANY type; nothing assumes
 // "one video + one audio" (a structural bug of the legacy app).
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace ma {
+
+// Defined in Alignment.hpp. Held behind a shared_ptr so MediaInfo.hpp stays
+// dependency-free (Alignment.hpp itself needs StreamKind / AnalysisResult).
+struct AlignmentReport;
 
 enum class StreamKind { Video, Audio, Subtitle, Data, Attachment, Unknown };
 
@@ -69,13 +74,22 @@ struct FrameRecord {
     int64_t size = 0;
     bool keyframe = false;
 
+    // HLS alignment extras. segmentIndex is the 0-based playlist position
+    // observed through FFmpeg's io_open hook (-1 = not segment scoped).
+    // wallClockMs exists only when the playlist carries PROGRAM-DATE-TIME;
+    // it is derived as segment PDT + (this packet's pts - segment's first pts).
+    int segmentIndex = -1;
+    std::optional<int64_t> wallClockMs;
+    // Synchronous I/P/B from this packet's own slice header. Never sourced
+    // from a lagging parser/decoder. Unset = bitstream type unknown.
+    std::optional<std::string> pictType;
+
     // Decode-only extras. These are geometry/format hints attached to the
     // packet row; they never replace packet-level timing, pictType or samples.
     bool decoded = false;
     std::optional<int> width;
     std::optional<int> height;
     std::optional<std::string> pixFmt;
-    std::optional<std::string> pictType;
     std::optional<std::string> sampleFmt;
     std::optional<int64_t> samples;
     std::optional<int> channels;
@@ -102,6 +116,9 @@ struct AnalysisResult {
     bool truncated = false;       // frames capped by options.maxFrames
     int64_t totalPacketsRead = 0;
     StageTimings timings;         // open / find_stream_info / demux breakdown
+    // Post-demux HLS/alignment diagnostics. Null when alignment is disabled or
+    // the analysis failed before any packet was read.
+    std::shared_ptr<AlignmentReport> alignment;
 };
 
 } // namespace ma

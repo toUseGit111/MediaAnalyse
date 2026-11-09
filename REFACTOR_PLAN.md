@@ -198,6 +198,8 @@ build/          CMake ≥ 3.28 + vcpkg（ffmpeg、Qt）+ 预设 presets；CI(Win
 7. **状态一致性**：任何新分析开始前清空三块信息区与两张表；失败时保留"上次成功"但必须显式标注为历史结果。
 8. **UI 技术（已定）**：Qt Quick/QML。QML 只做视图与交互，所有媒体数据经 `bridge/` 以 Qt 模型/信号进入 QML；帧表性能关键路径在 C++ 模型内，QML 侧禁止逐行填充。
 9. **语言与构建（已定）**：C++20（不低于 C++17）、CMake ≥ 3.28 + presets + vcpkg 依赖锁定；core/infra 不依赖 Qt，保证 CLI 与单测可直接链接。
+10. **帧类型判定（修订第 3 条，二次修订）**：`pict_type` 不再由 `AVCodecParserContext` 推断，也不由 `--decode` 的 `AVFrame` 回填。两者输出都相对 packet 滞后，增量快照一经发布便无法回填，实测会把 1 s GOP 的 RTSP 流显示成「开头 3 个 I、每 GOP 2 个 I」且真 IDR 被标成 P。第一版修复改成「只认 `AV_PKT_FLAG_KEY`」，虽消除了错位，却把用户需要的 `P`/`B` 标志一并删掉了。最终方案是**同步位流判定**：`infra/include/ma/infra/SliceType.hpp`（header-only、无 FFmpeg 依赖）逐包解析 H.264/H.265 `slice_type`、MPEG-1/2 `picture_coding_type`，全 I 编码直通 `I`，`AV_PKT_FLAG_KEY` 作为真 IDR 的权威兜底；零滞后、零跨包状态，快照行在生成时即定稿。概览关键帧计数独立按 `keyframe` 累计，`--decode` 仍保持纯附加（只补几何/格式 extras）。实测该 RTSP 录制流 119 帧 = 4 I + 115 P，与 ffprobe 解码直方图一致。回归：`tests/slice_type_test.cpp`（21 项合成 NAL + 畸形扫描）、`tests/pict_type_test.py`（8 项，可选 ffprobe 对照）、`tests/smoke_cli_json.py` 的 `slice types`。
+11. **概览与流信息合并为可折叠分组**：OVERVIEW（82 px 指标条）与 STREAMS（102–226 px 卡片流）原先是两个独立区块，小窗口下把帧表挤到只剩几行。现统一放进 `summaryPanel`，由一个可点击折叠头（或 `Ctrl+Shift+S`）控制，收起时释放约 230–350 px，DATAVIEW 的 `Layout.fillHeight` 自动补满；折叠头保留「来源 · N 条流 · M 包」摘要，NOTICE 作为全局状态留在容器内但**不绑定折叠状态**、始终可见。窗口高度 <780 逻辑像素且用户未手动切换时自动折叠。回归：`tests/summary_fold_test.py`（结构 4 项 + 实机截图对比，自动定位折叠头避免硬编码 DPI 坐标，点击折叠 + 快捷键恢复）。
 
 ---
 
@@ -258,6 +260,8 @@ build/          CMake ≥ 3.28 + vcpkg（ffmpeg、Qt）+ 预设 presets；CI(Win
 - **运行日志与诊断收集**：新增 `infra/Logger.hpp/.cpp`（跨进程滚动文件日志、`FILE_APPEND_DATA` 崩溃安全追加、大小滚动、URL 凭据脱敏、`MA_LOG_*` 环境变量、`emergencyLog` 无锁崩溃写入）；GUI 装 Qt 消息处理器抓 QML/Qt 警告，worker / CLI / bridge / CrashHandler 全链路打点；GUI 顶栏「日志」按钮；`scripts/collect-logs.cmd` + `collect_logs.ps1` 一键把日志 / minidump / 环境信息打成 zip；`scripts/package.py` 预建 `logs/` 并随包附带收集脚本；`tests/log_smoke.py` 17/17 通过，`tests/fuzz_worker.py` 默认 `MA_LOG_LEVEL=off` 保持万次 fuzz 零写盘。
 - **P3 阶段耗时诊断**：`core::StageTimings`（open / find_stream_info / demux / total，未到达为 -1 → JSON `null`）由 `ProbeAnalyzer` 在成功、取消、失败三条路径统一填充；CLI human 输出 `timings` 行、`--json` 输出 `timings` 对象、GUI「详情」toast 展示 `open/probe/demux` 秒数，失败时也能看出卡在哪个阶段。`ser_test` 增加 timings 往返断言（含 `-1 → null → -1`）。
 
+- **实时流增量显示（直播 0 行缺陷修复）**：`core::AnalysisSnapshot` / `SnapshotFn` 作为 `Analyzer::analyze` 的可选回调；`ProbeAnalyzer` 探测完成即发流信息快照、demux 按 128 包 + 0.25 s 双阈值发帧批次（复制 `r.frames` 区间，不额外持有增长向量）；worker 用同一 `toJson` 输出 `streams` / `frames` 两类增量行，最终 `result` 契约不变；`AnalysisController::liveUpdated` + `FrameTableModel::rowsAppended`（`beginInsertRows`）增量发布，QML 不清选区/过滤/滚动。新增 `tests/live_snapshot_test.py`（协议 17 项）与 `tests/live_stream_gui_test.py`（本地循环推 MPEG-TS，验证无 EOF 时流信息与帧行持续增长），构建树与分发包均 PASS。
+
 **冒烟测试结果**
 
 | 场景 | 旧版 | 新版 |
@@ -270,3 +274,51 @@ build/          CMake ≥ 3.28 + vcpkg（ffmpeg、Qt）+ 预设 presets；CI(Win
 | 不存在的路径 | 一句「解析失败」 | ✅ `file-not-found` + 建议 |
 
 **下一步**：P2 剩余（样本库 + golden 回归，等实际崩溃样本与「不支持」地址清单）→ P3 剩余（`protocol_whitelist` 白名单、TLS/自签证书/鉴权快捷项）→ P5 发布（变更日志细化、双跑对照报告）。打包链路已具备（`scripts/package.py`），P5 只剩版本号与变更日志的人工作业。
+
+---
+
+## 十二、HLS 录制文件对齐诊断专题（2026-11-09）
+
+**问题边界**：用户常查的是 HLS 录制文件，痛点是音画不同步、多路流 / 两份录制文件画面不同步。之前实测证明当前工具「能读，不能查」：本地 / HTTP `index.m3u8` 可打开（`format=hls`、292 包、4.03 s），但输出没有 segments / PDT / discontinuity 字段；漏标 discontinuity 的清单出现 1.03 s `dtsDelta` 跳变却 `diag=ok` 零告警；缺分片的清单只返回 76 包仍是 `diag=ok`。
+
+**关键输入**：当前生产 m3u8 **没有** `#EXT-X-PROGRAM-DATE-TIME`，后续录制端**可能**会加。→ 决策：PDT 是**可选增强锚点，不是前置依赖**，绝不能把「有没有 PDT」做成两套实现或让无 PDT 的样本失去诊断能力。
+
+**设计（单一时间轴、三档自动降级）**
+
+| `alignment.timeline` | 触发 | 文件内诊断 | 跨文件对齐 |
+|---|---|---|---|
+| `program-date-time` | 清单含 PDT | 全部 + 绝对墙上时钟 | 精确（PDT 差值，置信度 1.0） |
+| `playlist-elapsed` | 无 PDT、有 EXTINF | 全部（ΣEXTINF） | 相对，输出 `timeline-relative` 明示 |
+| `pts-only` | 无清单（单 ts / 不透明 URL） | 流内 + 流间 | 不支持 |
+
+后续清单出现 PDT 即自动升级，无需开关 / 重编译；部分 PDT 报 `pdt-partial` 警告，绝不伪造完整绝对时间轴。无 PDT 时 `--anchor-ms` 提供人工锚点（置信度 0.5），绝不把相对对齐伪装成精确偏移。
+
+**实现清单**
+
+- `core/Alignment.hpp/.cpp`：m3u8 解析（CRLF / EXTINF / PDT / DISCONTINUITY / MEDIA-SEQUENCE / master）、自实现 ISO-8601 ↔ epoch（不依赖 `timegm`/`_mkgmtime`）、`AlignmentReport`/`AlignmentIssue`/`StreamSyncMeta`、`computeAlignment()`、`compareTimelines()`。
+- `infra/HlsTimeline.hpp/.cpp`：AVIO 读本地 / HTTP 清单；`SegmentTracker` 挂 `AVFormatContext::io_open`，用**实测打开的分片 URL** 给每个包打 `segmentIndex`，而不是按 pts 反推（时间戳本身出错时反推会失效）。探测阶段已打开的分片在清单加载后回放补齐。
+- `ProbeAnalyzer`：分析结束（成功 / 停止 / 截断 / 读错误）统一做后处理；有 PDT 时按 `PDT + (pts − 分片首包 pts)` 回填 `wallClockMs`。
+- `Serialization`：`alignment` / `comparison` 段、`frames[].segment` / `wallClockMs`、`options.enableAlignment`，CLI / worker / GUI 共用同一 wire format。
+- CLI：`--no-align`、`--compare <file>`、`--anchor-ms N`；human 输出对齐摘要，`--json` 输出结构化报告。
+- GUI：SUMMARY 分组底部新增 `ALIGNMENT` 折叠头（默认一行，避免挤掉帧表），点开展示墙上时钟、每流偏移 / 漂移 / 空档与问题列表；Bridge 把报告转成 `QVariantMap` 并写日志。
+
+**诊断项**：`segment-missing`（error）、`unmarked-discontinuity`（error）/ `declared-discontinuity`（info）、`segment-duration-mismatch`、`pdt-gap`、`pdt-partial`、`av-offset`、`clock-drift`、`segment-av-shift`、`pts-nonmonotonic`、`stream-gap`、`timeline-relative`。漂移改用「pts 增量 − 声明时长」的中位数残差（对 1 s 空洞稳健），避免分片边界一帧抖动被误判成音画漂移。
+
+**验收**（四种真实清单：`index` 有 PDT / `leak` 无 PDT 漏标 / `discont` 无 PDT 已标注 / `missing` 缺分片）
+
+| 样本 | timeline | 结果 |
+|---|---|---|
+| `index.m3u8` | `program-date-time` | 4 分片全 opened、4 PDT、wall clock `07:52:48.227Z → 07:52:52.256Z`、0 error / 0 warning |
+| `leak.m3u8` | `playlist-elapsed` | 1 error `unmarked-discontinuity`（1.033 s）+ `segment-av-shift`；`timeline-relative` info |
+| `discont.m3u8` | `playlist-elapsed` | 0 error，仅 `declared-discontinuity` info |
+| `missing.m3u8` | `playlist-elapsed` | 1 error `segment-missing`，尽管 `diag=ok` |
+
+`tests/alignment_test.cpp` 40/40、`tests/alignment_cli_test.py` 12/12（含 worker IPC、三种 `--compare` 模式）；`ctest` 两个预设 3/3；既有回归 `smoke_cli_json` 7/7（无视频参数）、`live_snapshot` 17/17、`pict_type` 8/8、`summary_fold` 5/5（展开 6 行 → 折叠 26 行）、`log_smoke` 17/17、`gui_integration` / `live_stream_gui` PASS。
+
+**风险与待确认**
+
+1. master playlist（`#EXT-X-STREAM-INF`）目前只标记 `isMaster`，未自动选择 variant；若线上是 master 需先指定子清单。
+2. 加密分片（`#EXT-X-KEY`）/ BYTERANGE / fMP4 init segment 未做专门处理；分片归属靠 `io_open` 的 URL basename 匹配，同名不同目录的分片理论上可能误匹配。
+3. HTTP HLS 会多一次清单 GET（FFmpeg 一次、AVIO 一次）；直播清单会持续变化，当前按打开瞬间的一份快照诊断，不跟踪窗口滑动。
+4. PDT 时区缺失时按 UTC 解释（RFC 8216 应带时区）；`+08:00` / `+0800` / `Z` / 小数秒均已覆盖。
+5. 时钟漂移阈值 60 ms/min、A/V 偏移阈值 80/250 ms 是初值，需要用真实故障录制样本校准。
