@@ -51,7 +51,68 @@ cmake --build --preset win-mingw-app
 
 - `build/win-mingw/cli/media-analyse-cli.exe`、`build/win-mingw/worker/analyzer-worker.exe`（分层输出，FFmpeg + MinGW 运行时 DLL 已拷到同目录）
 - `build/win-mingw-app/` 是**扁平**输出（`qt_standard_project_setup` 把运行时目录指到构建根）：`media-analyse.exe`、`analyzer-worker.exe`、`media-analyse-cli.exe`、Qt DLL + `platforms/`/`qml/` 插件、`qt.conf` 全在这一层，整个目录即可运行
-- 正式分发不要直接拷该目录（里面混有测试 exe 与日志），用 `python scripts/package.py` 产出干净包到 `dist/MediaAnalyse-v1.0/`
+- 正式分发不要直接拷该目录（里面混有测试 exe、CMake 中间产物与日志，`build/win-mingw-app/` 实测约 **404 MB**），用 `python scripts/package.py` 产出干净包到 `dist/MediaAnalyse-v1.0/`
+
+## 打包：精简包 / 全量包
+
+**两种包共用同一套编译命令**，无需分别构建——编译一次 `win-mingw-app`，差别只在 `scripts/package.py` 的参数。只需桌面端时用精简包（默认）；需要脚本化 CLI、或在无 GPU 机器上运行则出全量包。
+
+### 1. 编译（两种包通用，Git Bash）
+
+```bash
+# 本机便携工具链未写入系统 PATH 时先执行这一行
+export PATH="/d/CodeTools/Qt/Tools/mingw1510_64/bin:/d/CodeTools/Qt/6.10.3/mingw_64/bin:/d/CodeTools/mingw64/bin:$PATH"
+
+cmake --preset win-mingw-app
+cmake --build --preset win-mingw-app --parallel 8
+```
+
+`win-mingw-app` 会连带产出 GUI、worker、CLI 与全部 Qt/FFmpeg 运行时 DLL；`windeployqt` 在构建时把插件部署到 `build/win-mingw-app/`。**单独跑 CLI 回归**才需要另一个预设 `cmake --preset win-mingw && cmake --build --preset win-mingw`，出桌面包不用它。
+
+### 2. 精简包（默认，推荐）
+
+```bash
+python scripts/package.py --zip --force
+```
+
+产出 `dist/MediaAnalyse-v1.0/`（约 **203.5 MB**）与 `dist/MediaAnalyse-v1.0.zip`（约 **76.2 MB**，为目录体积的 37%）。包含 `media-analyse.exe` + `analyzer-worker.exe` + 必需的 Qt/FFmpeg/MinGW DLL + `qt.conf` + Qt 插件/QML 模块 + 日志收集脚本。剪掉的内容经 PE 导入闭包验证均为运行时无引用或开发期产物：`swscale-10.dll`、`opengl32sw.dll`、`qmltooling/`、11 个 `*.qmltypes`；`media-analyse-cli.exe` 默认不随包。
+
+> `analyzer-worker.exe` 是 GUI 通过 `QProcess` 拉起的崩溃隔离子进程，**不能删**；删了界面能开但一分析就失败。
+
+### 3. 全量包
+
+```bash
+python scripts/package.py --full --with-cli --zip --force
+```
+
+产出 `dist/MediaAnalyse-v1.0/`（约 **231.1 MB**，160 个文件）与同名 `.zip`（约 **85.7 MB**）：保留软件 OpenGL 回退 `opengl32sw.dll`、QML 调试插件、`*.qmltypes`，并附带 `media-analyse-cli.exe`。`--full` 已包含 `opengl32sw.dll`，无需再加 `--with-software-gl`。
+
+### 4. 按需要组合
+
+```bash
+python scripts/package.py --with-cli --zip --force            # 精简包 + CLI
+python scripts/package.py --with-software-gl --zip --force    # 精简包 + 软件 GL 回退（VM / 远程桌面 / 无显卡）
+python scripts/package.py --full --out dist/full --zip --force  # 全量包输出到自定义目录
+```
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `--full` | 关（即默认精简） | 关闭剪枝，把 `windeployqt` 部署的东西全带上 |
+| `--with-cli` | 关 | 附带 `media-analyse-cli.exe`（脚本化排障/回归用） |
+| `--with-software-gl` | 关 | 精简模式下仍保留 `opengl32sw.dll`（+19.7 MB） |
+| `--zip` | 关 | 额外生成 `<输出目录名>.zip`（deflate），用于分发 |
+| `--out DIR` | `dist/MediaAnalyse-v1.0` | 指定输出目录，zip 会写为 `DIR.zip` |
+| `--force` | 关 | 覆盖已有输出目录；不带此参数且目录已存在会报错退出 |
+
+打包脚本会打印 `mode / pruned / size / largest / zip` 体积报告，便于核对剪枝结果与包大小。
+
+### 5. 体积说明与注意
+
+- **400 MB 的那个是构建目录，不是交付物**：`build/win-mingw-app/` 混有测试 exe、CMake 中间产物、日志与崩溃转储；正式分发请只发 `dist/` 下的目录或 zip。
+- 体积下限由 FFmpeg 决定：`avcodec-63.dll` 单独 **114.2 MB**，是 GPL 全量构建的真实代码段（`.text` 约 99 MB），**`strip` 对它无效**（实测 strip 前后同为 114.2 MB），不要尝试用去符号表减体积。若要再降一个数量级，只能换「只启用所需 demuxer/decoder」的精简 FFmpeg 构建，并同步调整 `MA_FFMPEG_RUNTIME_DLLS`；这属于工具链改造，需单独验证各类流的兼容性。
+- `opengl32sw.dll` 是 Qt Quick 在找不到硬件 OpenGL/ANGLE 时**按名字动态加载**的回退，PE 导入表里看不到它。普通带显卡的桌面机删掉无影响，但虚拟机/远程桌面可能白屏 → 用 `--with-software-gl` 或 `--full` 保留。
+- `--force` 会先删除整个输出目录；若包里的 `media-analyse.exe` 正在运行，Windows 会占用文件导致删除失败，先关闭程序再打包。
+- 分发前建议把包整体拷到**未装 Qt/FFmpeg 的机器**双击 `media-analyse.exe` 并解析一个本地文件，能出流卡片与帧表即部署完整；FFmpeg 为 GPL 构建，仅内部排障使用。
 
 ## CLI 用法
 

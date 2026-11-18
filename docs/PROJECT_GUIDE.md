@@ -150,10 +150,19 @@ build/win-mingw-app/                 # 扁平输出 —— 整个目录 ≈ 绿�
 ### 4.1 一条命令出包
 
 ```bash
-python scripts/package.py                       # -> dist/MediaAnalyse-v1.0
-python scripts/package.py --with-cli            # 附带 media-analyse-cli.exe
-python scripts/package.py --out dist/test --force
+# 精简包（默认，桌面端）：约 203.5 MB，--zip 另出 76.2 MB 压缩包
+python scripts/package.py --zip --force          # -> dist/MediaAnalyse-v1.0[.zip]
+
+# 全量包：约 231.1 MB / zip 85.7 MB，含 CLI、软件 OpenGL 回退、QML 调试插件
+python scripts/package.py --full --with-cli --zip --force
+
+# 按需要组合
+python scripts/package.py --with-cli --zip --force           # 精简包 + CLI
+python scripts/package.py --with-software-gl --zip --force   # 精简包 + opengl32sw.dll
+python scripts/package.py --full --out dist/full --zip --force
 ```
+
+**精简包与全量包共用同一套编译命令**（§3.2 的 `win-mingw-app`），无需分别构建，差别只在打包参数。默认精简模式按 PE 导入闭包剔除无引用的 `swscale-10.dll`、软件 GL 回退 `opengl32sw.dll`、`qmltooling/`、`*.qmltypes`，且不带 CLI；`analyzer-worker.exe` 始终保留（GUI 的崩溃隔离子进程）。完整参数表、体积对照与「400 MB 其实是构建目录」的说明见 `README.md` 的「打包：精简包 / 全量包」。
 
 脚本从 `build/win-mingw-app/` 中**挑选**运行时所需文件，产出干净目录：
 
@@ -174,7 +183,7 @@ dist/MediaAnalyse-v1.0/
 
 - Qt 依赖由 `windeployqt --qmldir app/qml --no-translations` 在**构建时**部署（`app/CMakeLists.txt` 的 POST_BUILD），只拷真正用到的 DLL / 插件，不整目录搬运。
 - `qt.conf` 由构建后自动改写为 `Prefix=.`：windeployqt 默认按 `bin/` 布局写 `Prefix=..`，而我们的 exe 就在包根，不改会加载不到插件。
-- FFmpeg 只拷 `avcodec/avformat/avutil/swscale/swresample` 这 5 类 DLL（`MA_FFMPEG_RUNTIME_DLLS`），不带 `ffmpeg.exe` / `ffplay.exe` / `ffprobe.exe`。
+- FFmpeg 构建期只部署 `avcodec/avformat/avutil/swscale/swresample` 这 5 类 DLL（`MA_FFMPEG_RUNTIME_DLLS`），不带 `ffmpeg.exe` / `ffplay.exe` / `ffprobe.exe`；精简包再剔除导入闭包中无人加载的 `swscale-10.dll`（剩 4 类），`--full` 保留 5 类。`opengl32sw.dll` 属 Qt 软件 GL 回退、按名字动态加载，只有 `--with-software-gl` / `--full` 才带。
 - 分发前建议实测：把 `dist/MediaAnalyse-v1.0` 整体拷到**没有安装 Qt/FFmpeg 的目录或机器**，双击 `media-analyse.exe` 打开一个本地文件——能出流卡片与帧表即部署完整。
 - 授权提醒：FFmpeg 为 **GPL** 构建，本项目仅内部排障使用，不对外分发。
 

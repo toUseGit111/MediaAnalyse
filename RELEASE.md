@@ -85,7 +85,7 @@ media-analyse-cli --opt rtsp_transport=tcp rtsp://127.0.0.1:8554/live
 - **P2 进程隔离 + minidump + fuzz 已完成**：分析内核拆为独立 `analyzer-worker.exe`，崩溃只杀 worker 并写 `<exedir>/crashes/<app>-<ts>.dmp`（stderr 打 `[CRASHDUMP]` 行）；看门狗最多自动重启一次；`tests/fuzz_worker.py` 跑通 1 万次变异 0 崩溃。**样本库 / golden 回归仍待补**（需实际崩溃样本与流地址清单）。
 - **P3 流媒体剩余**：`protocol_whitelist` 白名单快捷项、TLS / 自签证书 / 鉴权快捷项（阶段耗时分解已完成：open / find_stream_info / demux 贯穿 CLI 与 GUI）。
 - **HLS 对齐诊断待校准**：master playlist 目前只标记、不自动选 variant；加密分片 / BYTERANGE / fMP4 init segment 未做专项处理；HTTP HLS 会多一次清单 GET；漂移 60 ms/min、A/V 偏移 80/250 ms 阈值需用真实故障录制样本校准。PDT 后续上线后无需改代码即自动升级为绝对时间轴。
-- **P5 发布**：绿色包已可脚本化产出——`python scripts/package.py` 从构建树挑出 `media-analyse.exe` + `analyzer-worker.exe` + Qt/FFmpeg DLL + 插件/QML 模块，落到 `dist/MediaAnalyse-v1.0/`（不含测试 exe 与运行日志，但预建 `logs/README.txt` 并附带 `collect-logs.cmd`）；版本号与变更日志仍为人工维护。
+- **P5 发布**：绿色包已可脚本化产出——`python scripts/package.py` 从构建树挑出 `media-analyse.exe` + `analyzer-worker.exe` + Qt/FFmpeg DLL + 插件/QML 模块，落到 `dist/MediaAnalyse-v1.0/`（不含测试 exe 与运行日志，但预建 `logs/README.txt` 并附带 `collect-logs.cmd`）。默认出**精简包**（约 203.5 MB，`--zip` 后 76.2 MB）；`--full --with-cli --zip` 出**全量包**（231.1 MB / zip 85.7 MB）。两种包共用一次 `win-mingw-app` 编译，完整编译 + 打包指令与参数表见 `README.md`「打包：精简包 / 全量包」。版本号与变更日志仍为人工维护。
 
 ## 7. 故障排查
 
