@@ -20,6 +20,7 @@ add_library(ma_infra STATIC
     src/CrashHandler.cpp
     src/Logger.cpp
     src/HlsTimeline.cpp
+    src/CstoreFetcher.cpp
 )
 add_library(ma::infra ALIAS ma_infra)
 
@@ -38,7 +39,7 @@ target_compile_features(ma_infra PUBLIC cxx_std_20)
 # CrashHandler needs DbgHelp for MiniDumpWriteDump on Windows. A public link
 # propagates to every consumer (CLI, worker, GUI) so any of them can dump.
 if(WIN32)
-    target_link_libraries(ma_infra PUBLIC dbghelp)
+    target_link_libraries(ma_infra PUBLIC dbghelp winhttp)
 endif()
 
 if(MSVC)

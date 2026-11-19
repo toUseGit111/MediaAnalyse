@@ -33,6 +33,7 @@ python scripts/package.py --with-cli
 MediaAnalyse/
 ├─ CMakeLists.txt            顶层构建入口：C++20、子目录装配、Qt 探测时机
 ├─ CMakePresets.json         两个预设：win-mingw（CLI）/ win-mingw-app（GUI），写死便携工具链绝对路径
+├─ CMakeUserPresets.json     由 setup_toolchain.py 生成的本地预设（gitignore，不入库）
 ├─ README.md                 设计说明 + 行为契约 + 界面分区 + 进度
 ├─ RELEASE.md                发布说明与验收结果
 ├─ REFACTOR_PLAN.md          分阶段重构计划（P0–P5）与当前状态
@@ -55,13 +56,13 @@ MediaAnalyse/
 | 目录 | 包含内容 | 边界规则 |
 |---|---|---|
 | `core/` | `Result.hpp`（`Outcome`/`Diagnostic`：**错误即数据**）、`MediaInfo.hpp`（`AnalysisResult`/`StreamInfo`/`FrameRecord`/`StageTimings`）、`Analyzer.hpp`（分析接口 + `AnalysisOptions`）、`Alignment.hpp/.cpp`（**HLS 时间轴与对齐诊断**：playlist 解析、PDT 可选的三档时间基准、诊断算法、跨文件比较）、`UrlNormalizer`（`file:///C:/` → `file:C:/` 等 7 类修正）、`Serialization`（**JSON wire format 契约**：`toJson`/`fromJson`/`parseAnalyzeRequest`，含 `alignment`/`comparison` 段） | 不 include 任何 Qt / FFmpeg 头；不含 I/O 策略 |
-| `infra/` | `Raii.hpp`（RAII）、`Interrupt.cpp`（`av_log` → 日志桥接 + 分阶段超时 + 协作取消）、`SliceType.hpp`（**同步 I/P/B 位流读取**：header-only、无 FFmpeg 依赖、逐包 slice header 解析）、`HlsTimeline.hpp/.cpp`（AVIO 读 m3u8 + `io_open` 分片归属追踪）、`ProbeAnalyzer.cpp`（open → find_stream_info → demux，可选解码）、`CrashHandler.cpp`（minidump + 异常过滤器）、`Logger.hpp/.cpp`（跨进程滚动文件日志 + 凭据脱敏 + 崩溃应急写入） | 只依赖 `core` + FFmpeg；不出现 Qt |
+| `infra/` | `Raii.hpp`（RAII）、`Interrupt.cpp`（`av_log` → 日志桥接 + 分阶段超时 + 协作取消）、`SliceType.hpp`（**同步 I/P/B 位流读取**：header-only、无 FFmpeg 依赖、逐包 slice header 解析）、`HlsTimeline.hpp/.cpp`（AVIO 读 m3u8 + `io_open` 分片归属追踪）、`ProbeAnalyzer.cpp`（open → find_stream_info → demux，可选解码）、`CstoreFetcher.hpp/.cpp`（**cstore 录制回捞**：WinHTTP 解析 downloadUrl、并发拉全分片、保留缺片空洞，产出本地清单）、`CrashHandler.cpp`（minidump + 异常过滤器）、`Logger.hpp/.cpp`（跨进程滚动文件日志 + 凭据脱敏 + 崩溃应急写入） | 只依赖 `core` + FFmpeg（+ Windows WinHTTP）；不出现 Qt |
 | `worker/` | `worker_main.cpp`：从 stdin 读一条 analyze 请求，向 stdout 流式写 progress、探测后的 `streams` 行与逐批 `frames` 行，最后写全量 result；独立线程监听 `cancel`；启动即装 CrashHandler | 只链接 `core`+`infra`，**不链接 Qt**；崩溃只死自己 |
 | `bridge/` | `Bridge.hpp/.cpp`：`AnalysisController`（`QProcess` 拉起 worker、解析 JSON、看门狗 + 自动重启一次、取消、`liveUpdated` 增量发布）、`FrameTableModel`（多列 `QAbstractTableModel` + 文本过滤 + 可见行映射 + `rowsAppended` 增量插入） | 唯一允许同时接触内核与 Qt 的层；QML 只认这一层 |
 | `app/` | `main.cpp`（`QApplication` + 命令行传参自动分析 + CrashHandler）、`qml/`（`Main.qml` 布局交互、`Theme.qml` 设计令牌单例、`PrismButton/SectionHead/MetricCell/StreamCard/FrameGrid` 组件） | QML 不直接碰 C++ 内核，全部经 `bridge` |
 | `cli/` | `main.cpp`：参数解析、human / `--json` 两种输出、退出码约定 | 与 worker 共用同一 `Serialization`，输出格式不会漂移 |
 | `tests/` | `ser_test.cpp`（序列化往返 + 信封 + timings `-1→null→-1`）、`slice_type_test.cpp`（同步 I/P/B 位流读取 21 项：合成 Annex-B/avcC/HEVC/MPEG-2 NAL + 畸形输入扫描，纯头文件无 FFmpeg 依赖）、`controller_test.cpp`（**无窗口**控制器头测）、`smoke_cli_json.py`（CLI JSON 回归 14 项）、`pict_type_test.py`（帧类型一致性 8 项，可直接喂文件 / RTSP 地址 / 可选 ffprobe 对照）、`gui_integration_test.py`（GUI+worker 隔离冒烟）、`summary_fold_test.py`（折叠结构 4 项 + 实机截图对比 1 项：自动定位折叠头、点击折叠、`Ctrl+Shift+S` 恢复、帧表行分隔符上移与行数增长）、`live_snapshot_test.py`（增量快照协议 17 项）、`live_stream_gui_test.py`（本地无限 TS 流端到端）、`fuzz_worker.py`（变异/截断 fuzz）、`log_smoke.py`（日志 17 项回归）、`alignment_test.cpp`（HLS 时间轴/对齐纯算法 40 项）、`alignment_cli_test.py`（四种真实 m3u8 清单端到端 12 项，样本缺失时用 ffmpeg 再生成）、`assets/sample.mp4`（4 s、320×176 H.264 + AAC 测试素材）、`manual/`（需本地推流环境的手工脚本：`ma_gui_check.py` 窗口截图/驱动、`ma_hls_test.py`、`ma_live_test.py`） | `ser_test` 只依赖 `ma_core`，`slice_type_test` 只 include 一个纯头文件；都不拖 FFmpeg/Qt；`controller_test` 仅在 `MA_ENABLE_APP=ON` 时构建 |
-| `scripts/` | `package.py`：从构建树挑出运行时文件，产出一个干净的可分发目录；`collect-logs.cmd` + `collect_logs.ps1`：一键把日志 / minidump / 环境信息打包成 zip | 幂等；不修改构建树；收集脚本只用 Windows 自带组件 |
+| `scripts/` | `package.py`：从构建树挑出运行时文件，产出一个干净的可分发目录（自动识别 `win-mingw-app` / `local-win-mingw-app`）；`setup_toolchain.py`：一键下载部署绿色工具链并生成 `CMakeUserPresets.json`；`collect-logs.cmd` + `collect_logs.ps1`：一键把日志 / minidump / 环境信息打包成 zip | 幂等；不修改构建树；收集脚本只用 Windows 自带组件 |
 | `docs/` | `design/`（PRISM 设计稿：`design-preview.html`、`media-analyzer.qss`、参考截图、`qt_reference.py`）、`screenshots/`（成品界面 6 张 + `final_ui.png`）、`verification/`（fuzz 报告 JSON）、`PROJECT_GUIDE.md`（本文） | 纯文档资产，不参与构建 |
 
 ### 2.2 数据流（为什么这样分层）
@@ -95,14 +96,18 @@ MediaAnalyse/
 | Qt 配套 MinGW | 15.1 `D:\CodeTools\Qt\Tools\mingw1510_64\bin` | **GUI 必须用它**：用 GCC 16 链接 Qt 会因 `__imp___argc` 等符号不兼容失败 |
 | FFmpeg | 9.0.2 `D:\CodeTools\ffmpeg-n9.0-latest-win64-gpl-shared-9.0` | 开发包 + 运行时 DLL |
 
-CMake 最低 3.24，语言标准 C++20。工具链路径全部写死在 `CMakePresets.json` 里，换机器只需改这一个文件。
+CMake 最低 3.24，语言标准 C++20。`CMakePresets.json` 里的路径写死为 `D:\CodeTools`；换机器不必手改它，运行 `python scripts/setup_toolchain.py` 即可：脚本优先扫描 MediaAnalyse 同级目录中已有的工具链，找不到就在同级建 `CodeTools/`，下载并校验 FFmpeg / GCC 16 / Ninja，再用 `aqtinstall` 免账号安装 Qt 6.10.3 + MinGW 15.1，并生成 `CMakeUserPresets.json`（`local-win-mingw` / `local-win-mingw-app`）。`--scan-only` 只看扫描结果，`--root` 显式指定目录，`--skip-qt` 跳过 Qt 安装。
 
-### 3.2 两个预设
+### 3.2 预设
 
 | 预设 | 编译工具链 | 产物 | 适用 |
 |---|---|---|---|
 | `win-mingw` | GCC 16.2.0 | CLI、worker、`ma_ser_test` | 只改内核 / 只想跑命令行 |
 | `win-mingw-app` | Qt 配套 MinGW 15.1 | GUI + 以上全部 + `ma_controller_test` | 改界面、验证隔离链路、打包 |
+| `local-win-mingw` | 同上，路径来自 `CMakeUserPresets.json` | 同 `win-mingw` | 工具链不在 `D:\CodeTools` 时用它 |
+| `local-win-mingw-app` | 同上，路径来自 `CMakeUserPresets.json` | 同 `win-mingw-app` | 推荐：新机器部署后统一用它 |
+
+前两个是仓库里的固定路径预设；后两个由 `scripts/setup_toolchain.py` 按实际工具链位置生成，继承前两者并覆盖编译器、Ninja、Qt 与 FFmpeg 路径。
 
 ```bash
 # 只构建命令行与内核
@@ -112,6 +117,11 @@ cmake --build --preset win-mingw --parallel 8
 # 构建完整 GUI（会连带构建 CLI、worker、全部测试）
 cmake --preset win-mingw-app
 cmake --build --preset win-mingw-app --parallel 8
+
+# 新机器：部署 + 用本地预设构建
+python scripts/setup_toolchain.py
+cmake --preset local-win-mingw-app
+cmake --build --preset local-win-mingw-app --parallel 8
 ```
 
 ### 3.3 产物落点（实测）
@@ -164,7 +174,7 @@ python scripts/package.py --full --out dist/full --zip --force
 
 **精简包与全量包共用同一套编译命令**（§3.2 的 `win-mingw-app`），无需分别构建，差别只在打包参数。默认精简模式按 PE 导入闭包剔除无引用的 `swscale-10.dll`、软件 GL 回退 `opengl32sw.dll`、`qmltooling/`、`*.qmltypes`，且不带 CLI；`analyzer-worker.exe` 始终保留（GUI 的崩溃隔离子进程）。完整参数表、体积对照与「400 MB 其实是构建目录」的说明见 `README.md` 的「打包：精简包 / 全量包」。
 
-脚本从 `build/win-mingw-app/` 中**挑选**运行时所需文件，产出干净目录：
+脚本默认从 `build/win-mingw-app/` 或 `build/local-win-mingw-app/`（由 `setup_toolchain.py` 生成的预设产出）中**自动挑选**存在 `media-analyse.exe` 的构建树，也可用 `--build-dir` 显式指定；然后**挑选**运行时所需文件，产出干净目录：
 
 ```
 dist/MediaAnalyse-v1.0/
@@ -236,7 +246,8 @@ media-analyse-cli [--json] [--frames[=N]] [--decode] \
                   [--max-frames N] [--max-decode-frames N] \
                   [--probesize B] [--analyze-duration US] \
                   [--connect-timeout S] [--stall-timeout S] [--probe-timeout S] \
-                  [--opt K=V] [--no-align] [--compare <file>] [--anchor-ms N] \
+                  [--opt K=V] [--cstore [--fetch-dir DIR] [--fetch-jobs N] [--fetch-timeout S]] \
+                  [--no-align] [--compare <file>] [--anchor-ms N] \
                   <url|file>
 ```
 
@@ -252,6 +263,8 @@ media-analyse-cli [--json] [--frames[=N]] [--decode] \
 | `--no-align` | 跳过 HLS 时间轴 / 对齐后处理，只输出原始包 |
 | `--compare <file>` | 再分析一份录制文件，输出 `comparison`（两份都有 PDT 时为精确墙上时钟偏移） |
 | `--anchor-ms N` | 无 PDT 时给 `--compare` 指定人工同步点（毫秒，正值=主文件更晚，置信度 0.5） |
+| `--cstore` | 输入当作 cstore 对象 key，先回捞清单+全部分片到本地再分析（详见 README §「从 cstore 回捞录制分片并诊断」） |
+| `--fetch-dir DIR` / `--fetch-jobs N` / `--fetch-timeout S` | 配合 `--cstore`：落地目录（默认 `./fetched/<key>`）/ 并发数 1–16（默认 4）/ 单请求超时秒（默认 30） |
 
 对齐诊断详见 README §「HLS 录制文件对齐诊断（PDT 可选）」。选项可以放在主输入之前或之后；未加引号、含空格的 Windows 路径仍会被自动拼接。
 
@@ -274,6 +287,17 @@ JSON 信封（成功路径，节选）：
 ```
 
 失败路径 `ok=false`，`diagnostic` 给出 `{code, stage, nativeCode, message, hint, url}`，未到达阶段的 `timings` 为 `null`。脚本可只依赖 `ok` + `diagnostic.stage` 做断言。
+
+#### cstore 录制回捞（CLI / worker / GUI 一条路径）
+
+`AnalysisOptions` 增加四个字段：`source`、`fetchDir`、`fetchJobs`、`fetchTimeout`。`source` 为空时输入直接交给 FFmpeg（原行为不变）；`source="cstore"` 时 `infra/CstoreFetcher` 先用 WinHTTP 调 `downloadUrl` 接口解析清单与分片链接，并发拉全部分片到本地，再把本地 `local.m3u8` 交给同一个 `ProbeAnalyzer`。因此诊断能力与本地文件完全一致，缺片同样报 `segment-missing`（失败分片保留清单行、只让本地文件缺失；重复回捞会先清旧分片）。
+
+- **CLI**：`--cstore` 及 `--fetch-*` 参数（见上表）。
+- **worker**：请求 `options.source="cstore"`，抓取过程额外输出 `{"type":"fetch","phase":"start|progress|done","downloaded":N,"total":M,"failed":K}` 行；最终结果行 `notes` 带 `cstore fetch ...` 摘要。
+- **GUI**：高级选项区「cstore 录制回捞」开关；开启后输入按对象 key 处理（自动使用 URL 输入框），`Bridge` 把四个字段透传给 worker，并把 `fetch` 行转成 `fetchProgress` 信号更新状态栏。
+- 落地目录默认 `.<cwd>/fetched/<sanitized-key>/`，已加入 `.gitignore`；内含 `local.m3u8` + `segment_NNN.ts`，可直接喂 CLI 复现诊断而无需联网。
+
+接口细节与示例见 README 同名章节。WinHTTP 仅 Windows，非 Windows 构建调用会返回明确诊断而非静默失败。
 
 ### 5.3 崩溃与 minidump
 
@@ -386,13 +410,18 @@ python tests/manual/ma_gui_check.py --exe build/win-mingw-app/media-analyse.exe 
 
 | 现象 | 原因 / 处理 |
 |---|---|
-| `cmake: command not found` | `D:\CodeTools\mingw64\bin` 不在 PATH，用绝对路径调 `cmake.exe` |
+| `cmake: command not found` | 本机有 CMake 3.26.3 可直接用；若工具链在其他盘，跑 `python scripts/setup_toolchain.py` 生成 `local-*` 预设 |
+| `Could not read presets from .../scripts: File not found` | 预设文件在项目根目录；先 `cd` 回 `E:\code\MediaAnalyse` 再执行 cmake（脚本末尾已打印 `cd` 命令） |
+| 换机器后 `cmake --preset win-mingw-app` 找不到编译器 | 路径写死在 `D:\CodeTools`；跑 `python scripts/setup_toolchain.py`，改用 `local-win-mingw-app` 预设 |
+| CXX compiler 测试失败但看不到编译器报错 | Qt MinGW 的 `g++` 要通过 PATH 找 `as.exe`/`ld.exe`；`local-*` 预设已内置 `Path`，重新跑一次 setup 脚本刷新 `CMakeUserPresets.json`，不要用 PowerShell 手工清掉 PATH |
 | 链接报 `Permission denied` | 旧 `media-analyse.exe` 仍在跑：`taskkill /F /IM media-analyse.exe` |
-| Qt 链接报 `__imp___argc` 等符号错误 | 用了 GCC 16 编 GUI，改用 `win-mingw-app` 预设（Qt 配套 MinGW 15.1） |
+| Qt 链接报 `__imp___argc` 等符号错误 | 用了 GCC 16 编 GUI，改用 `win-mingw-app` / `local-win-mingw-app` 预设（Qt 配套 MinGW 15.1） |
 | 双击 exe 无窗口 / 提示缺 DLL | 缺 `platforms/qwindows.dll` 或 `qt.conf` 被改坏：重新 build 或重新 `scripts/package.py` |
 | 界面文字/图标异常但功能正常 | 远程桌面/老显卡：设 `QT_QUICK_BACKEND=software` 走软件渲染 |
 | 使用中出现异常但没有任何线索 | 先看 `logs/*.log`（GUI 顶栏「日志」按钮可直接打开目录）；双击 `collect-logs.cmd` 生成诊断 zip 回传 |
 | 日志目录为空 / 找不到日志 | 可能装在只读目录，检查 `%LOCALAPPDATA%\MediaAnalyse\logs` 与 `%TEMP%\MediaAnalyse\logs`；也可用 `MA_LOG_DIR` 显式指定 |
 | 分析无结果、GUI 报 dmp 路径 | 内核崩溃已被隔离，看 `crashes/*.dmp`；用 fuzz 复现输入回归 |
 | 网络流「连不上」 | 先确认 FFmpeg 能拉：`ffprobe <url>`；再试 `--opt rtsp_transport=tcp`、加大 `--probe-timeout` |
+| `--cstore` 全部分片下载失败 | 先用 `curl -H 'Content-Type: application/json' -d '["<key>"]' 'http://cstore.seewo.com/cstore/api/v2/downloadUrl?isTmp=false&appId=10363'` 确认 key 与接口可达；再加大 `--fetch-timeout`、减小 `--fetch-jobs` |
+| cstore 诊断里 `segment-missing` 偏多 | 区分「回捞失败」与「录制本身缺片」：看落地目录 `fetched/<key>/` 是否有对应 `segment_NNN.ts`；缺文件即回捞失败，可重跑 `--cstore` 补捞；文件齐全仍报缺片则是录制真实缺片 |
 | 改了 QML 没变化 | QML 编进资源，必须重新 build |

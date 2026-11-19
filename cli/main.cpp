@@ -14,6 +14,12 @@
 //   --stall-timeout S     between-packets timeout, seconds
 //   --probe-timeout S     hard ceiling for find_stream_info (0 = auto)
 //   --opt K=V             pass raw option to FFmpeg (repeatable)
+//   --cstore              treat <url|file> as a cstore object key: resolve and
+//                         download the playlist + ALL TS segments via the
+//                         cstore API, then analyze the local playlist
+//   --fetch-dir DIR       where to put fetched segments (default: ./fetched/<key>)
+//   --fetch-jobs N        parallel segment downloads (default 4, max 16)
+//   --fetch-timeout S     per-request timeout in seconds (default 30)
 //   --no-align            skip HLS timeline / A-V alignment post-processing
 //   --compare <file>      analyze a second recording and report their offset;
 //                         exact with #EXT-X-PROGRAM-DATE-TIME, otherwise a
@@ -39,6 +45,7 @@
 #include "ma/infra/Ffmpeg.hpp"
 #include "ma/infra/Interrupt.hpp"
 #include "ma/infra/ProbeAnalyzer.hpp"
+#include "ma/infra/CstoreFetcher.hpp"
 #include "ma/infra/CrashHandler.hpp"
 #include "ma/infra/Logger.hpp"
 
@@ -278,12 +285,21 @@ int main(int argc, char** argv) {
             auto eq = kv.find('=');
             if (eq != std::string::npos)
                 args.opts.extraOptions.emplace_back(kv.substr(0, eq), kv.substr(eq + 1));
-        } else if (v == "-h" || v == "--help") {
+        } else if (v == "--cstore") {
+            args.opts.source = "cstore";
+        } else if (v == "--fetch-dir")
+            args.opts.fetchDir = optArg(a, i);
+        else if (v == "--fetch-jobs")
+            args.opts.fetchJobs = static_cast<int>(std::atoll(optArg(a, i).c_str()));
+        else if (v == "--fetch-timeout")
+            args.opts.fetchTimeout = std::atof(optArg(a, i).c_str());
+        else if (v == "-h" || v == "--help") {
             std::puts("usage: media-analyse-cli [--json] [--frames[=N]] [--decode] "
                       "[--max-frames N] [--max-decode-frames N] "
                       "[--probesize B] [--analyze-duration US] "
                       "[--connect-timeout S] [--stall-timeout S] [--probe-timeout S] "
-                      "[--opt K=V] [--no-align] [--compare <file>] "
+                      "[--opt K=V] [--cstore [--fetch-dir DIR] [--fetch-jobs N] "
+                      "[--fetch-timeout S]] [--no-align] [--compare <file>] "
                       "[--anchor-ms N] <url|file>");
             return 2;
         } else if (!v.empty() && v[0] == '-' && v.size() > 1) {
@@ -310,7 +326,48 @@ int main(int argc, char** argv) {
 
     auto analyzer = ma::infra::createProbeAnalyzer();
     ma::CancelFlag cancel{false};
+
+    // Optional cstore adapter: materialize the whole recording first, then
+    // hand the local playlist to the very same analyzer. The fetch step is
+    // deliberately outside the kernel so all existing diagnostics stay intact.
+    std::string fetchNotes;
+    if (args.opts.source == "cstore") {
+        if (!args.json)
+            std::fprintf(stderr, "[cstore] fetching %s ...\n", args.input.c_str());
+        auto fetched = ma::infra::fetchCstoreRecording(
+            args.input, args.opts, &cancel,
+            [&](int done, int total, const std::string& phase) {
+                if (!args.json && done && (done % 20 == 0 || done == total))
+                    std::fprintf(stderr, "[cstore] %s %d/%d\n",
+                                 phase.c_str(), done, total);
+            });
+        if (!fetched.ok()) {
+            const auto& fd = fetched.diag;
+            std::fprintf(stderr, "FAILED[%s/%s]: %s%s%s\n",
+                         ma::toString(fd.code), ma::toString(fd.stage),
+                         fd.message.c_str(),
+                         fd.hint.empty() ? "" : " hint=", fd.hint.c_str());
+            if (args.json) {
+                std::fputs(ma::core::toJson(ma::AnalysisResult{}, fd, false,
+                                            "result", "", 0, nullptr).c_str(),
+                           stdout);
+            }
+            return 1;
+        }
+        fetchNotes = ma::infra::describeFetch(*fetched);
+        if (!args.json)
+            std::fprintf(stderr, "[cstore] %s -> %s\n",
+                         fetchNotes.c_str(), fetched->localPlaylist.c_str());
+        MA_LOGI("cli", "cstore fetch " << fetchNotes
+                       << " elapsed=" << fetched->elapsedSeconds);
+        args.input = fetched->localPlaylist;
+    }
+
     auto outcome = analyzer->analyze(args.input, args.opts, &cancel, {});
+    if (!fetchNotes.empty()) {
+        outcome.diag.hint = fetchNotes +
+                            (outcome.diag.hint.empty() ? "" : " | " + outcome.diag.hint);
+    }
 
     const auto& od = outcome.diag;
     MA_LOGI("cli", "result ok=" << outcome.ok()

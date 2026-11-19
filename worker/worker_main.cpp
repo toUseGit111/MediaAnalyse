@@ -33,6 +33,7 @@
 #include "ma/infra/Interrupt.hpp"
 #include "ma/infra/Logger.hpp"
 #include "ma/infra/ProbeAnalyzer.hpp"
+#include "ma/infra/CstoreFetcher.hpp"
 
 namespace {
 
@@ -95,6 +96,39 @@ int main() {
             }
         }
     });
+
+    // cstore adapter: materialize the recording before the kernel sees it.
+    // Fetch progress uses the same JSON-line channel so the GUI can show it.
+    std::string fetchNotes;
+    if (opts.source == "cstore") {
+        MA_LOGI("worker", "cstore fetch key=" << ma::infra::redact(input));
+        emitLine("{\"type\":\"fetch\",\"phase\":\"start\",\"done\":0,\"total\":0}");
+        auto fetched = ma::infra::fetchCstoreRecording(
+            input, opts, &cancel,
+            [&](int done, int total, const std::string& phase) {
+                emitLine("{\"type\":\"fetch\",\"phase\":\"" + phase +
+                         "\",\"done\":" + std::to_string(done) +
+                         ",\"total\":" + std::to_string(total) + "}");
+            });
+        if (!fetched.ok()) {
+            ma::Outcome<ma::AnalysisResult> fail;
+            fail.diag = fetched.diag;
+            fail.diag.stage = ma::Stage::Open;
+            MA_LOGE("worker", "cstore fetch failed: "
+                                  << ma::infra::redact(fail.diag.message));
+            emitLine(ma::core::toJson(fail.value, fail.diag, false, "result"));
+            std::cout.flush();
+            std::_Exit(0);
+        }
+        fetchNotes = ma::infra::describeFetch(*fetched);
+        input = fetched->localPlaylist;
+        MA_LOGI("worker", "cstore " << fetchNotes
+                       << " elapsed=" << fetched->elapsedSeconds);
+        emitLine("{\"type\":\"fetch\",\"phase\":\"done\",\"done\":" +
+                 std::to_string(fetched->segmentsDownloaded) +
+                 ",\"total\":" + std::to_string(fetched->segmentsTotal) +
+                 ",\"note\":" + ma::core::jsonQuote(fetchNotes) + "}");
+    }
 
     auto analyzer = ma::infra::createProbeAnalyzer();
 
@@ -175,6 +209,11 @@ int main() {
                        << " probe=" << t.probeSeconds
                        << " demux=" << t.demuxSeconds
                        << " total=" << t.totalSeconds);
+
+    if (!fetchNotes.empty()) {
+        outcome.diag.hint = fetchNotes +
+                            (outcome.diag.hint.empty() ? "" : " | " + outcome.diag.hint);
+    }
 
     // Always emit a final result line (ok or structured error). The GUI treats
     // a worker process that exits WITHOUT a result line as a crash.

@@ -28,3 +28,9 @@ __pycache__/
 # --- Editor / OS cruft ---
 Thumbs.db
 Desktop.ini
+
+# --- 本地工具链路径（由 scripts/setup_toolchain.py 生成） ---
+CMakeUserPresets.json
+
+# --- cstore 抓取的录制分片（体积大、可重新回捞） ---
+fetched/

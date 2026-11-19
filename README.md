@@ -28,7 +28,7 @@ build/   CMake 构建产物（已 gitignore，可随时删除重建）
 
 ## 构建
 
-工具链（已在本机 `D:\CodeTools` 就位，均为绿色解压，无 UAC）：
+工具链（原开发机在 `D:\CodeTools`，均为绿色解压、无 UAC；当前机器请用下方一键脚本部署）：
 
 | 组件 | 路径 |
 |---|---|
@@ -36,6 +36,8 @@ build/   CMake 构建产物（已 gitignore，可随时删除重建）
 | Qt 6.10.3 (mingw_64) | `D:\CodeTools\Qt\6.10.3\mingw_64` |
 | Qt 配套 MinGW 15.1（app 必须用它） | `D:\CodeTools\Qt\Tools\mingw1510_64\bin` |
 | FFmpeg 9.0.2 开发包 | `D:\CodeTools\ffmpeg-n9.0-latest-win64-gpl-shared-9.0` |
+
+换机器时不用手改预设：运行 `python scripts/setup_toolchain.py`，脚本会先扫描 MediaAnalyse 同级目录找现成工具链，找不到就在同级创建 `CodeTools/`，下载 FFmpeg / GCC 16 / Ninja，并用 `aqtinstall` 免账号拉取 Qt 6.10.3 + MinGW 15.1，最后生成 `CMakeUserPresets.json`（已加入 .gitignore）。之后把下面的 `win-mingw*` 换成 `local-win-mingw*` 即可构建。`--scan-only` 只列扫描结果，`--root` 显式指定目录，`--skip-qt` 跳过 Qt 安装。
 
 ```bash
 # 只构建 CLI（GCC 16 工具链）
@@ -55,7 +57,7 @@ cmake --build --preset win-mingw-app
 
 ## 打包：精简包 / 全量包
 
-**两种包共用同一套编译命令**，无需分别构建——编译一次 `win-mingw-app`，差别只在 `scripts/package.py` 的参数。只需桌面端时用精简包（默认）；需要脚本化 CLI、或在无 GPU 机器上运行则出全量包。
+**两种包共用同一套编译命令**，无需分别构建——编译一次 `win-mingw-app`（或 `local-win-mingw-app`），差别只在 `scripts/package.py` 的参数。`package.py` 会自动识别 `build/win-mingw-app/` 与 `build/local-win-mingw-app/`，也可用 `--build-dir` 显式指定。只需桌面端时用精简包（默认）；需要脚本化 CLI、或在无 GPU 机器上运行则出全量包。
 
 ### 1. 编译（两种包通用，Git Bash）
 
@@ -66,6 +68,8 @@ export PATH="/d/CodeTools/Qt/Tools/mingw1510_64/bin:/d/CodeTools/Qt/6.10.3/mingw
 cmake --preset win-mingw-app
 cmake --build --preset win-mingw-app --parallel 8
 ```
+
+若用 `python scripts/setup_toolchain.py` 生成的 `local-win-mingw-app` 预设，则**不需要**上面这行 `export PATH`——预设里已写死解析出的实际工具链路径。
 
 `win-mingw-app` 会连带产出 GUI、worker、CLI 与全部 Qt/FFmpeg 运行时 DLL；`windeployqt` 在构建时把插件部署到 `build/win-mingw-app/`。**单独跑 CLI 回归**才需要另一个预设 `cmake --preset win-mingw && cmake --build --preset win-mingw`，出桌面包不用它。
 
@@ -121,7 +125,8 @@ media-analyse-cli [--json] [--frames[=N]] [--decode] \
                   [--max-frames N] [--max-decode-frames N] \
                   [--probesize B] [--analyze-duration US] \
                   [--connect-timeout S] [--stall-timeout S] [--probe-timeout S] \
-                  [--opt K=V] [--no-align] [--compare <file>] [--anchor-ms N] \
+                  [--opt K=V] [--cstore [--fetch-dir DIR] [--fetch-jobs N] [--fetch-timeout S]] \
+                  [--no-align] [--compare <file>] [--anchor-ms N] \
                   <url|file>
 ```
 
@@ -176,6 +181,39 @@ media-analyse-cli --no-align record/index.m3u8                   # 跳过后处�
 GUI：SUMMARY 折叠分组底部新增 `ALIGNMENT / 对齐诊断` 折叠头，默认只占一行（时间基准 + 错误/警告数，不挤压帧表），点开展示墙上时钟起止、每条流的起始偏移 / 时钟漂移 / 最大空档，以及问题列表。
 
 回归：`python tests/alignment_cli_test.py`（12 项，四种真实清单 + IPC + 三种比较模式；样本缺失时用 ffmpeg 自动再生成）、`ctest` 中的 `alignment_test`（40 项纯算法单测）。
+
+## 从 cstore 回捞录制分片并诊断
+
+录制清单在 cstore 对象存储上时，加 `--cstore` 把 `<url|file>` 参数当作**对象 key**（不是本地路径）。CLI 会先经 `cstore downloadUrl` 接口解析出清单与每个分片的临时下载链接，并发拉全部分片到本地，再交给同一个分析内核——诊断逻辑与本地 m3u8 完全一致。
+
+```bash
+# key 来自 cstore 路径，例如 seewo-edulyse/uwiwkvxphjxnjhhvhyyjxlxmljhhihhh.m3u8
+media-analyse-cli --cstore --json \
+  --fetch-jobs 8 --fetch-timeout 20 \
+  'seewo-edulyse/uwiwkvxphjxnjhhvhyyjxlxmljhhihhh.m3u8'
+```
+
+| 参数 | 含义 | 默认 |
+|---|---|---|
+| `--cstore` | 把输入当作 cstore 对象 key，先回捞再分析 | 关闭（输入直接交给 FFmpeg） |
+| `--fetch-dir DIR` | 分片落地目录 | `./fetched/<key 文件名>/` |
+| `--fetch-jobs N` | 并发下载分片数（1–16） | `4` |
+| `--fetch-timeout S` | 单个 HTTP 请求超时秒数（1–600） | `30` |
+
+关键行为：
+
+- **保留分片序号空洞**：下载失败的分片本地文件缺失、但清单行保留，内核据此报 `segment-missing`（不会像老的测试脚本那样把失败行注释掉、从而掩盖缺片）。重复回捞同一目录时会先清掉旧分片，避免上次成功的文件掩盖本次失败。
+- **抓取进度/结果进 JSON**：成功时顶层 `notes` 追加一段 `cstore fetch ...`；worker 协议额外发 `{"type":"fetch","phase":"start|progress|done"}` 行，GUI 据此显示「回捞录制分片中…」与计数。
+- **抓取产物可复用**：落地目录里是标准 `local.m3u8` + `segment_000.ts`…，可直接 `media-analyse-cli <dir>/local.m3u8` 重跑诊断，不必再次回捞（`fetched/` 已加入 `.gitignore`）。
+
+GUI：高级选项区勾选「cstore 录制回捞」后在URL输入框粘贴对象 key（本地模式也会自动改用该输入框），状态栏实时显示抓取进度。worker 请求用 `options.source="cstore"` 触发同一路径：
+
+```json
+{"type":"analyze","input":"seewo-edulyse/xxx.m3u8",
+ "options":{"source":"cstore","fetchJobs":8,"fetchTimeout":20,"enableAlignment":true}}
+```
+
+实现：`infra/include/ma/infra/CstoreFetcher.hpp` / `infra/src/CstoreFetcher.cpp`，基于 WinHTTP（无新增第三方依赖），仅 Windows 可用；非 Windows 平台调用会返回明确诊断。
 
 ## 界面（PRISM 设计系统）
 

@@ -44,6 +44,28 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_BUILD = os.path.join(ROOT, "build", "win-mingw-app")
+LOCAL_BUILD = os.path.join(ROOT, "build", "local-win-mingw-app")
+
+
+def resolve_build_dir(explicit=None):
+    """Pick the app build tree, preferring an explicit --build-dir.
+
+    The default preset writes to build/win-mingw-app; the local preset generated
+    by setup_toolchain.py writes to build/local-win-mingw-app. Auto-detect so
+    `python scripts/package.py --zip` works after either build.
+    """
+    if explicit:
+        return explicit
+    for candidate in (DEFAULT_BUILD, LOCAL_BUILD):
+        if os.path.exists(os.path.join(candidate, "media-analyse.exe")):
+            return candidate
+    build_root = os.path.join(ROOT, "build")
+    if os.path.isdir(build_root):
+        for name in sorted(os.listdir(build_root)):
+            candidate = os.path.join(build_root, name)
+            if os.path.exists(os.path.join(candidate, "media-analyse.exe")):
+                return candidate
+    return DEFAULT_BUILD
 
 # Directories windeployqt creates next to the exe; copy whichever exist.
 PLUGIN_DIRS = [
@@ -104,7 +126,8 @@ def human(n):
 
 def main():
     ap = argparse.ArgumentParser(description="Stage a clean MediaAnalyse package.")
-    ap.add_argument("--build-dir", default=DEFAULT_BUILD)
+    ap.add_argument("--build-dir", default=None,
+                    help="app build tree (auto-detected between win-mingw-app and local-win-mingw-app)")
     ap.add_argument("--out", default=os.path.join(ROOT, "dist", "MediaAnalyse-v1.0"))
     ap.add_argument("--with-cli", action="store_true",
                     help="also ship media-analyse-cli.exe (scripted analysis)")
@@ -119,14 +142,18 @@ def main():
     args = ap.parse_args()
     slim = not args.full
 
-    src = os.path.abspath(args.build_dir)
+    src = os.path.abspath(resolve_build_dir(args.build_dir))
     dst = os.path.abspath(args.out)
     gui = os.path.join(src, "media-analyse.exe")
     if not os.path.exists(gui):
         print(f"ERROR: {gui} not found. Build the app preset first:\n"
               f"       cmake --preset win-mingw-app && "
-              f"cmake --build --preset win-mingw-app")
+              f"cmake --build --preset win-mingw-app\n"
+              f"   or  cmake --preset local-win-mingw-app && "
+              f"cmake --build --preset local-win-mingw-app\n"
+              f"(or pass --build-dir <path>)")
         return 1
+    print(f"build tree: {src}")
 
     if os.path.isdir(dst):
         if not args.force:

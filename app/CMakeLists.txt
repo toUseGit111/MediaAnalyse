@@ -20,6 +20,14 @@ qt_add_qml_module(media-analyse
         qml/FrameGrid.qml
 )
 
+# Embed the icon for the window/taskbar (QIcon ":/icons/app.ico"); the exe
+# file icon itself comes from app.rc below. Regenerate with scripts/generate_icon.py.
+set_source_files_properties(app.ico PROPERTIES QT_RESOURCE_ALIAS app.ico)
+qt_add_resources(media-analyse "app_icons"
+    PREFIX "/icons"
+    FILES app.ico
+)
+
 # QApplication (from QtWidgets) is required by the native file dialog.
 target_link_libraries(media-analyse PRIVATE ma::bridge Qt6::Widgets)
 
@@ -77,5 +85,8 @@ add_custom_target(ma_deploy_runtime ALL
 )
 
 if(WIN32)
+    # Windows resource script: sets the .exe file/taskbar icon (IDI_ICON1).
+    # MinGW windres resolves "app.ico" relative to app.rc's own directory.
+    target_sources(media-analyse PRIVATE app.rc)
     set_target_properties(media-analyse PROPERTIES WIN32_EXECUTABLE ON)
 endif()

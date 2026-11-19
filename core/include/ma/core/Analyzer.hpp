@@ -38,6 +38,20 @@ struct AnalysisOptions {
     // Passed verbatim to the AVDictionary, e.g. rtsp_transport=tcp,
     // method=post, headers=..., reconnect=1, protocol_whitelist=...
     std::vector<std::pair<std::string, std::string>> extraOptions;
+
+    // Optional remote-source adapter (infra/CstoreFetcher). Empty means the
+    // input is handed straight to FFmpeg as before. "cstore" treats `input` as
+    // a cstore object key (e.g. seewo-edulyse/xxx.m3u8): the fetcher resolves
+    // the playlist and every segment through the cstore downloadUrl API,
+    // materializes them locally, and the existing analyzer reads the local
+    // playlist. Segment numbering holes are preserved so the alignment pass
+    // can report "segment-missing".
+    std::string source;
+    // Directory for the fetched playlist/TS files. Empty = auto under
+    // <cwd>/fetched/<sanitized-key>/
+    std::string fetchDir;
+    int fetchJobs = 4;                // parallel segment downloads, 1..16
+    double fetchTimeout = 30.0;       // seconds, per HTTP request
 };
 
 struct Progress {

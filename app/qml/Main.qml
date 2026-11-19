@@ -29,6 +29,8 @@ ApplicationWindow {
 
     // ---------------- state ----------------
     property bool isUrlMode: false
+    property bool cstoreMode: false
+    property string fetchText: ""
     property int tabIndex: 0
     property var streamList: []
     property var summary: ({})
@@ -277,7 +279,8 @@ ApplicationWindow {
 
     property string overviewTail: {
         if (root.errorDiag && root.errorDiag.code) return "解析失败 · " + root.errorDiag.code
-        if (Analysis.busy) return "解析中 · " + Analysis.statusText
+        if (Analysis.busy) return root.fetchText !== ""
+            ? root.fetchText : ("解析中 · " + Analysis.statusText)
         if (root.isUrlMode)
             return root.proto.ok ? "实时解析 · " + Number(root.summary.frameRate || 0).toFixed(1) + " fps"
                                  : "等待有效的流地址"
@@ -378,6 +381,7 @@ ApplicationWindow {
     // ---------------- actions ----------------
     function startAnalysis() {
         root.errorDiag = ({})
+        root.fetchText = ""
         root.noticeDismissed = false
         var opts = ({
             connectTimeout: connectSpin.value,
@@ -386,14 +390,20 @@ ApplicationWindow {
             maxFrames: maxFramesSpin.value,
             decodeFrames: root.decodeOn,
             maxDecodeFrames: maxDecodeSpin.value,
-            extraOptions: root.parseExtra(extraField.text)
+            extraOptions: root.parseExtra(extraField.text),
+            source: root.cstoreMode ? "cstore" : "",
+            fetchDir: fetchDirField.text.trim(),
+            fetchJobs: fetchJobsSpin.value
         })
-        Analysis.start(root.isUrlMode ? urlField.text.trim() : pathField.text.trim(), opts)
+        var input = root.cstoreMode ? urlField.text.trim()
+                                    : (root.isUrlMode ? urlField.text.trim()
+                                                      : pathField.text.trim())
+        Analysis.start(input, opts)
     }
 
     function openClicked() {
         if (Analysis.busy) return       // Stop is a separate button now
-        if (root.isUrlMode) {
+        if (root.isUrlMode || root.cstoreMode) {
             if (urlField.text.trim().length === 0) { urlField.forceActiveFocus(); return }
         } else {
             var picked = Analysis.pickMediaFile()
@@ -1600,6 +1610,74 @@ ApplicationWindow {
                 }
             }
             Text {
+                text: "录制回捞（cstore）"
+                color: Theme.text2
+                font.family: Theme.uiFont
+                font.pixelSize: 11
+                font.bold: true
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Rectangle {
+                    width: 16; height: 16; radius: 3
+                    color: root.cstoreMode ? Theme.accent : Theme.sunken
+                    border.color: root.cstoreMode ? Theme.accent : Theme.line2
+                    border.width: 1
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            root.cstoreMode = !root.cstoreMode
+                            if (root.cstoreMode) root.isUrlMode = true
+                        }
+                    }
+                    Text {
+                        anchors.centerIn: parent
+                        text: root.cstoreMode ? "✓" : ""
+                        color: Theme.surface1
+                        font.pixelSize: 12
+                    }
+                }
+                Text {
+                    text: "从上方的「网络流」输入框读取 cstore 对象键（如 seewo-edulyse/xxx.m3u8），先拉全分片再分析"
+                    color: Theme.text3
+                    font.family: Theme.uiFont
+                    font.pixelSize: 11
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+            }
+            GridLayout {
+                columns: 2
+                columnSpacing: 12
+                rowSpacing: 8
+                Label { text: "本地保存目录 (空=自动)"; color: Theme.text2; font.pixelSize: 12 }
+                TextField {
+                    id: fetchDirField
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 30
+                    placeholderText: "例: D:/cstore-fetched"
+                    placeholderTextColor: Theme.text4
+                    color: Theme.text1
+                    font.family: Theme.monoFont
+                    font.pixelSize: 11
+                    selectByMouse: true
+                    background: Rectangle {
+                        radius: 6; color: Theme.sunken
+                        border.color: fetchDirField.activeFocus ? Theme.accent : Theme.line2
+                    }
+                }
+                Label { text: "并发下载数"; color: Theme.text2; font.pixelSize: 12 }
+                SpinBox {
+                    id: fetchJobsSpin; from: 1; to: 16; value: 4; editable: true
+                    palette.windowText: Theme.text1; palette.text: Theme.text1
+                    palette.window: Theme.sunken; palette.base: Theme.sunken
+                    palette.button: Theme.surface2; palette.buttonText: Theme.text1
+                    background: Rectangle { radius: 6; color: Theme.sunken; border.color: Theme.line2 }
+                }
+            }
+            Text {
                 text: "FFmpeg 高级选项  K=V，逗号 / 分号 / 换行分隔"
                 color: Theme.text2
                 font.family: Theme.uiFont
@@ -1678,6 +1756,13 @@ ApplicationWindow {
             root.errorDiag = diag
             root.noticeDismissed = false
             root.showToast("解析失败 · " + (diag.message || diag.code))
+        }
+        function onFetchProgress(done, total, phase) {
+            if (phase === "start") {
+                root.fetchText = "回捞中 · 0 个分片"
+            } else if (phase === "download" && total > 0) {
+                root.fetchText = "回捞中 · " + done + " / " + total + " 个分片"
+            }
         }
     }
 }

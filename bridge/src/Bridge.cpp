@@ -402,6 +402,12 @@ void AnalysisController::start(const QString& rawInput, const QVariantMap& optio
     for (auto it = extra.begin(); it != extra.end(); ++it)
         opts.extraOptions.emplace_back(it.key().toStdString(),
                                        it.value().toString().toStdString());
+    opts.source = options.value("source").toString().toStdString();
+    opts.fetchDir = options.value("fetchDir").toString().toStdString();
+    if (options.contains("fetchJobs"))
+        opts.fetchJobs = options.value("fetchJobs").toInt();
+    if (options.contains("fetchTimeout"))
+        opts.fetchTimeout = options.value("fetchTimeout").toDouble();
 
     // FFmpeg's Windows file protocol expects UTF-8. QString::toStdString()
     // uses the local 8-bit codepage (GBK on zh-CN), which corrupts non-ASCII
@@ -842,6 +848,23 @@ void AnalysisController::onWorkerOutput() {
 
 void AnalysisController::handleWorkerLine(const std::string& line) {
     const std::string t = ma::core::jsonFieldString(line, "type");
+    if (t == "fetch") {
+        const int done = static_cast<int>(ma::core::jsonFieldInt(line, "done"));
+        const int total = static_cast<int>(ma::core::jsonFieldInt(line, "total"));
+        const QString phase = QString::fromStdString(
+            ma::core::jsonFieldString(line, "phase"));
+        const QString note = QString::fromStdString(
+            ma::core::jsonFieldString(line, "note"));
+        if (phase == QLatin1String("start")) {
+            statusText_ = tr("回捞录制分片中...");
+            emit statusTextChanged();
+        } else if (phase == QLatin1String("done")) {
+            statusText_ = note.isEmpty() ? tr("分片回捞完成") : note;
+            emit statusTextChanged();
+        }
+        emit fetchProgress(done, total, phase);
+        return;
+    }
     if (t == "progress") {
         const int64_t pk = ma::core::jsonFieldInt(line, "packetsRead");
         const double el = ma::core::jsonFieldDouble(line, "elapsed");

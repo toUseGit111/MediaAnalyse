@@ -1,6 +1,7 @@
 // media-analyse - QML application entry point.
 #include <QApplication>
 #include <QCoreApplication>
+#include <QIcon>
 #include <QDir>
 #include <QFileInfo>
 #include <QQmlApplicationEngine>
@@ -62,6 +63,8 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QApplication::setApplicationName("media-analyse");
     QApplication::setApplicationVersion("0.1.0");
+    // Window/taskbar icon, embedded via qt_add_resources in app/CMakeLists.txt.
+    QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/app.ico")));
 
     MA_LOGI("app", "session start v"
                        << QApplication::applicationVersion().toUtf8().constData()

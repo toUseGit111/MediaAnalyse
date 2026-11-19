@@ -8,7 +8,7 @@
 - **定位**：内部排障工具，**不对外商用**。原仓库无源码，本版基于旧版行为规格从头重写。
 - **UI**：Qt 6.10.3 Quick / QML（深色 PRISM 风格）
 - **媒体内核**：FFmpeg 9.0.2（avcodec 63 / avformat 63 / avutil 61）
-- **语言 / 构建**：C++20 + CMake（presets：GUI `win-mingw-app`、CLI `win-mingw`）
+- **语言 / 构建**：C++20 + CMake（presets：GUI `win-mingw-app`、CLI `win-mingw`；换机器用 `scripts/setup_toolchain.py` 生成 `local-win-mingw-app` / `local-win-mingw`）
 
 ## 2. 相比旧版解决的核心问题
 

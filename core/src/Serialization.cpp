@@ -705,6 +705,10 @@ std::string toOptionsJson(const AnalysisOptions& o) {
     s += "\"maxDecodeFrames\":" + std::to_string(o.maxDecodeFrames) + ",";
     s += std::string("\"keepUnknownStreams\":") + (o.keepUnknownStreams ? "true" : "false") + ",";
     s += std::string("\"enableAlignment\":") + (o.enableAlignment ? "true" : "false") + ",";
+    s += "\"source\":" + jstr(o.source) + ",";
+    s += "\"fetchDir\":" + jstr(o.fetchDir) + ",";
+    s += "\"fetchJobs\":" + std::to_string(o.fetchJobs) + ",";
+    s += "\"fetchTimeout\":" + jnum(o.fetchTimeout) + ",";
     s += "\"extraOptions\":[";
     for (size_t i = 0; i < o.extraOptions.size(); ++i) {
         s += "{\"k\":" + jstr(o.extraOptions[i].first) +
@@ -728,6 +732,10 @@ bool fromOptionsJson(const JVal& root, AnalysisOptions& o) {
     if (const JVal* x = root.find("maxDecodeFrames")) o.maxDecodeFrames = x->asInt();
     if (const JVal* x = root.find("keepUnknownStreams")) o.keepUnknownStreams = x->asBool();
     if (const JVal* x = root.find("enableAlignment")) o.enableAlignment = x->asBool();
+    if (const JVal* x = root.find("source")) o.source = x->asString();
+    if (const JVal* x = root.find("fetchDir")) o.fetchDir = x->asString();
+    if (const JVal* x = root.find("fetchJobs")) o.fetchJobs = static_cast<int>(x->asInt());
+    if (const JVal* x = root.find("fetchTimeout")) o.fetchTimeout = x->asDouble();
     if (const JVal* eo = root.find("extraOptions"); eo && eo->isArray()) {
         for (const auto& e : eo->arr) {
             if (!e.isObject()) continue;

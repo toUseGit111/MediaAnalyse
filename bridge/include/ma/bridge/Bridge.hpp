@@ -155,6 +155,8 @@ signals:
     // a status-state change - never as a modal error dialog.
     void analysisFailed(const QVariantMap& diagnostic);
     void progressUpdated(int64_t packetsRead, double elapsedSeconds);
+    // cstore fetch phase: done/total segments (or 0/0 before counting).
+    void fetchProgress(int done, int total, const QString& phase);
     // Incremental view of a still-running analysis (live stream). `streams` is
     // non-empty only on the first snapshot; QML must NOT reset selection,
     // filter or scroll position when handling this signal.
