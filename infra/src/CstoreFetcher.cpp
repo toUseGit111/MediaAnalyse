@@ -440,17 +440,30 @@ Outcome<FetchReport> fetchCstoreRecording(const std::string& rawKey,
 #else
     const double timeout = std::clamp(options.fetchTimeout, 1.0, 600.0);
 
-    std::filesystem::path dir;
-    if (!options.fetchDir.empty()) {
-        dir = std::filesystem::path(options.fetchDir);
-    } else {
-        dir = std::filesystem::current_path() / "fetched" / sanitizeStem(rep.objectKey);
-    }
+    const bool explicitDir = !options.fetchDir.empty();
+    std::filesystem::path dir = explicitDir
+        ? std::filesystem::path(options.fetchDir)
+        : std::filesystem::current_path() / "fetched" / sanitizeStem(rep.objectKey);
     std::error_code ec;
     if (!std::filesystem::create_directories(dir, ec) && ec) {
-        diag.code = Errc::InvalidArgument;
-        diag.message = "cannot create fetch directory: " + ec.message();
-        return out;
+        if (explicitDir) {
+            diag.code = Errc::InvalidArgument;
+            diag.message = "cannot create fetch directory: " + ec.message();
+            return out;
+        }
+        // A deep caller cwd (e.g. a GUI opened from a long path) pushes
+        // <cwd>/fetched/<key> past Windows MAX_PATH. Fall back to a short,
+        // stable location under the system temp dir instead of failing.
+        const std::filesystem::path fallback =
+            std::filesystem::temp_directory_path() / "MediaAnalyse" /
+            "fetched" / sanitizeStem(rep.objectKey);
+        ec.clear();
+        if (!std::filesystem::create_directories(fallback, ec) && !ec) dir = fallback;
+        if (ec) {
+            diag.code = Errc::InvalidArgument;
+            diag.message = "cannot create fetch directory: " + ec.message();
+            return out;
+        }
     }
     rep.directory = pathToUtf8(std::filesystem::absolute(dir));
 

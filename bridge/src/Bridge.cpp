@@ -358,6 +358,51 @@ static QVariantMap alignmentToVariantMap(const ma::AlignmentReport& a) {
     };
 }
 
+// Cross-file comparison -> a compact QVariantMap for the SUMMARY panel.
+static QVariantMap comparisonToVariantMap(const ma::TimelineComparison& c) {
+    QVariantMap m{
+        {"comparable", c.comparable},
+        {"method", QString::fromStdString(c.method)},
+        {"offsetMs", c.offsetMs},
+        {"confidence", c.confidence},
+        {"overlapSeconds", c.overlapSeconds},
+        {"note", QString::fromStdString(c.note)},
+        {"firstWallClockA", c.firstWallClockA
+                                ? QString::fromStdString(
+                                      ma::formatEpochMsUtc(*c.firstWallClockA))
+                                : QString()},
+        {"firstWallClockB", c.firstWallClockB
+                                ? QString::fromStdString(
+                                      ma::formatEpochMsUtc(*c.firstWallClockB))
+                                : QString()},
+        {"windowSeconds", c.windowSeconds},
+        {"driftMsPerMin", c.driftMsPerMin},
+        {"maxDeviationMs", c.maxDeviationMs},
+    };
+    QVariantList windows;
+    for (const auto& w : c.windows) {
+        windows.append(QVariantMap{
+            {"start", w.startSeconds},
+            {"end", w.endSeconds},
+            {"offsetMs", w.offsetMs},
+            {"samples", w.sampleCount},
+        });
+    }
+    QVariantList anomalies;
+    for (const auto& a : c.anomalies) {
+        anomalies.append(QVariantMap{
+            {"start", a.startSeconds},
+            {"end", a.endSeconds},
+            {"offsetMs", a.offsetMs},
+            {"deviationMs", a.deviationMs},
+            {"kind", QString::fromStdString(a.kind)},
+        });
+    }
+    m["windows"] = windows;
+    m["anomalies"] = anomalies;
+    return m;
+}
+
 static QVariantMap diagToMap(const ma::Diagnostic& d,
                              const ma::StageTimings* t = nullptr) {
     QVariantMap m{
@@ -408,6 +453,13 @@ void AnalysisController::start(const QString& rawInput, const QVariantMap& optio
         opts.fetchJobs = options.value("fetchJobs").toInt();
     if (options.contains("fetchTimeout"))
         opts.fetchTimeout = options.value("fetchTimeout").toDouble();
+    opts.compareInput = options.value("compareInput").toString().toStdString();
+    opts.compareSource = options.value("compareSource").toString().toStdString();
+    opts.compareFullOutput = options.value("compareFullOutput").toBool();
+    if (options.contains("hasAnchorMs"))
+        opts.hasAnchorMs = options.value("hasAnchorMs").toBool();
+    if (options.contains("anchorMs"))
+        opts.anchorMs = options.value("anchorMs").toDouble();
 
     // FFmpeg's Windows file protocol expects UTF-8. QString::toStdString()
     // uses the local 8-bit codepage (GBK on zh-CN), which corrupts non-ASCII
@@ -426,6 +478,8 @@ void AnalysisController::start(const QString& rawInput, const QVariantMap& optio
     emit stoppingChanged();
     statusText_ = tr("Analyzing...");
     emit statusTextChanged();
+    if (opts.compareFullOutput && secondary_)
+        secondary_->beginExternalRun();
 
     // Hand the whole job to the crash-isolated worker process: build the request
     // envelope and let launchWorker() spawn/pipe it. All results and progress
@@ -436,6 +490,37 @@ void AnalysisController::start(const QString& rawInput, const QVariantMap& optio
     launchWorker(req);
 }
 
+void AnalysisController::beginExternalRun() {
+    if (busy_) return;
+    // A second comparison run must not leave the previous B rows on screen
+    // while the new input is being fetched/probed.
+    frameStore_.clear();
+    videoRows_.clear();
+    audioRows_.clear();
+    videoModel_.reset(&videoRows_);
+    audioModel_.reset(&audioRows_);
+    liveHeader_ = ma::AnalysisResult{};
+    liveStreams_.clear();
+    liveStreamVariants_.clear();
+    emit countsChanged();
+    busy_ = true;
+    stopping_ = false;
+    gotResult_ = false;
+    userRequestedStop_ = false;
+    liveFramesStarted_ = false;
+    emit busyChanged();
+    emit stoppingChanged();
+    statusText_ = tr("Analyzing second source...");
+    emit statusTextChanged();
+}
+
+void AnalysisController::markExternalStop() {
+    if (!busy_) return;
+    userRequestedStop_ = true;
+    stopping_ = true;
+    emit stoppingChanged();
+}
+
 void AnalysisController::cancel() {
     // A late click after the result was delivered is a no-op, not a new
     // analysis and not an error. The redesigned UI also keeps Stop as a
@@ -444,6 +529,7 @@ void AnalysisController::cancel() {
     MA_LOGI("bridge", "cancel requested by user");
     userRequestedStop_ = true;
     stopping_ = true;
+    if (secondary_) secondary_->markExternalStop();
     emit stoppingChanged();
     statusText_ = tr("Cancelling... waiting for the underlying I/O to return");
     emit statusTextChanged();
@@ -542,7 +628,9 @@ void AnalysisController::copySelection(bool video, int firstRow, int lastRow,
     emit statusTextChanged();
 }
 
-void AnalysisController::finishWith(ma::Outcome<ma::AnalysisResult> outcome) {
+void AnalysisController::finishWith(
+    ma::Outcome<ma::AnalysisResult> outcome,
+    const ma::TimelineComparison* comparison) {
     // Pressing "Stop" is a normal outcome, NEVER an error. An interrupted
     // FFmpeg read can surface as EIO / AVERROR_EXIT rather than a clean
     // Cancelled code, so a stop requested BEFORE completion also neutralises
@@ -664,6 +752,8 @@ void AnalysisController::finishWith(ma::Outcome<ma::AnalysisResult> outcome) {
         {"demuxSeconds", r.timings.demuxSeconds},
         {"notes", QString::fromStdString(outcome.diag.hint)},
         {"alignment", alignmentMap},
+        {"comparison", comparison ? comparisonToVariantMap(*comparison)
+                                  : QVariantMap{}},
     };
     if (userStopped) {
         statusText_ = tr("Stopped by user - showing %1 partial rows")
@@ -808,6 +898,12 @@ void AnalysisController::launchWorker(const std::string& req) {
     if (worker_.state() != QProcess::NotRunning) worker_.kill();
 
     worker_.setProcessChannelMode(QProcess::SeparateChannels);
+    // The worker inherits our process cwd by default. A GUI launched from a
+    // deep directory then makes the cstore fetcher's default
+    // <cwd>/fetched/<key> exceed Windows MAX_PATH ("Filename too long").
+    // Pin the cwd to the app directory — short, stable, and consistent with
+    // where this worker already writes its logs and minidumps.
+    worker_.setWorkingDirectory(QGuiApplication::applicationDirPath());
     worker_.start(workerPath_, QStringList());
     if (!worker_.waitForStarted(5000)) {
         MA_LOGE("bridge", "worker failed to start: "
@@ -847,6 +943,14 @@ void AnalysisController::onWorkerOutput() {
 }
 
 void AnalysisController::handleWorkerLine(const std::string& line) {
+    // Dual-source mode: the primary worker also emits B's progress/snapshots/
+    // result. Route them to the second controller so its own table models are
+    // populated without ever spawning a second analyzer-worker process.
+    const std::string src = ma::core::jsonFieldString(line, "source");
+    if (src == "B" && secondary_ && secondary_ != this) {
+        secondary_->ingestExternalLine(line);
+        return;
+    }
     const std::string t = ma::core::jsonFieldString(line, "type");
     if (t == "fetch") {
         const int done = static_cast<int>(ma::core::jsonFieldInt(line, "done"));
@@ -889,7 +993,8 @@ void AnalysisController::handleWorkerLine(const std::string& line) {
     // as a full result/diagnostic object.
     ma::AnalysisResult r;
     ma::Diagnostic d;
-    if (ma::core::fromJson(line, r, d)) {
+    ma::TimelineComparison comparison;
+    if (ma::core::fromJson(line, r, d, &comparison)) {
         gotResult_ = true;
         MA_LOGI("bridge", "worker result: code=" << ma::toString(d.code)
                           << " stage=" << ma::toString(d.stage)
@@ -903,7 +1008,9 @@ void AnalysisController::handleWorkerLine(const std::string& line) {
         ma::Outcome<ma::AnalysisResult> outcome;
         outcome.value = std::move(r);
         outcome.diag = d;
-        finishWith(std::move(outcome));
+        const ma::TimelineComparison* cmpPtr =
+            comparison.method.empty() ? nullptr : &comparison;
+        finishWith(std::move(outcome), cmpPtr);
     } else {
         MA_LOGW("bridge", "unparsable worker line: "
                               << line.substr(0, 200));

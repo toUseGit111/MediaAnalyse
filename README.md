@@ -176,9 +176,13 @@ media-analyse-cli --compare other.m3u8 --anchor-ms 1500 record/index.m3u8  # 无
 media-analyse-cli --no-align record/index.m3u8                   # 跳过后处理，只要原始包
 ```
 
-`--compare` 在 JSON 里输出 `comparison{method,offsetMs,confidence,overlapSeconds,note}`：双方都有 PDT 时 `method=pdt` 且 `offsetMs` 为墙上时钟差；任一方缺 PDT 时降级为 `relative`（置信度 0）并明确提示，或用 `--anchor-ms` 指定一个共同事件（如打板 / 时间码）得到 `manual-anchor`（置信度 0.5）。**不会在没有绝对时钟时编造一个看起来精确的偏移。**
+`--compare` 在 JSON 里输出 `comparison{method,offsetMs,confidence,overlapSeconds,note,windows,anomalies,driftMsPerMin,maxDeviationMs}`，按可信度依次尝试：双方都有 PDT → `method=pdt`（置信度 1.0）；无 PDT 但两路有相同编码的关键帧 → `method=content-signature`（置信度 0.35~0.85）；编码不同但分片包数序列一致 → `method=segment-pattern`（置信度 0.4，绝对偏移有周期歧义，重点看漂移与异常时段）；否则可用 `--anchor-ms` 指定共同事件得到 `manual-anchor`（置信度 0.5）；都没有才降级为 `relative`（置信度 0）。**不会在没有证据时编造一个看起来精确的偏移。**
 
 GUI：SUMMARY 折叠分组底部新增 `ALIGNMENT / 对齐诊断` 折叠头，默认只占一行（时间基准 + 错误/警告数，不挤压帧表），点开展示墙上时钟起止、每条流的起始偏移 / 时钟漂移 / 最大空档，以及问题列表。
+
+**GUI 双流 / 双文件对比**：顶栏按钮在「单流分析」与「多流对比」之间切换。多流对比时 SOURCE 面板出现 A / B 两行输入：A 沿用原有的本地文件 / 网络流切换，B 接受本地文件路径或任意流地址，也可单独勾选 `cstore` 把 B 当作对象键回捞。点击「对比解析」后，同一个 worker 依次分析两路输入，但把 A / B 的流信息、帧批次和最终结果分别标记为 `source:"A"` / `source:"B"` 送回 GUI，两套表格模型互不覆盖。工具栏新增「源 A / 源 B」切换，配合「视频 / 音频」即可分别查看两路的逐帧信息；SUMMARY 的 `DUAL SOURCE / 双路状态` 卡片显示各自的包数、流数、视频/音频帧数，点击卡片也能切换当前帧表。对比结果作为 `COMPARISON / 双路对比` 卡片显示在 ALIGNMENT 展开区底部，列出方法、偏移、置信度、重叠秒数、说明、A/B 结构差异（包数 / 流数 / 视频音频帧数及 Δ），以及**按 10 秒窗口绘制的偏移曲线**：虚线为整体偏移，红色段为异常时段，下面直接列出「`mm:ss → mm:ss` 突变/局部偏移 +X ms」。这样播放中“某一段时间不同步”会落到具体时间区间，而不再只是一个全局平均偏移。颜色按置信度区分：1.0 绿（PDT 精确）、0.35~0.85 黄（帧签名 / 人工锚点）、0 红（只能相对比较）。
+
+人工锚点毫秒偏移直接放在 B 路输入行（「锚点 ms」），无需打开配置；留空即按 PDT → 帧签名 → 相对比较的顺序自动选择。A / B 都可以是 cstore 对象键，各自回捞到独立的临时目录，避免路径冲突。
 
 回归：`python tests/alignment_cli_test.py`（12 项，四种真实清单 + IPC + 三种比较模式；样本缺失时用 ffmpeg 自动再生成）、`ctest` 中的 `alignment_test`（40 项纯算法单测）。
 

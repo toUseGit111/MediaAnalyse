@@ -224,8 +224,11 @@ media-analyse.exe "rtsp://127.0.0.1:8554/live"
 | 过滤框 | 按任意列文本筛选；Tab 行数与状态栏同步 |
 | 滚轮 | 上下滚动（一格 3 行），`Shift` + 滚轮横向 |
 | 「SUMMARY / 概览与流信息」折叠头 | 点击整行或按 `Ctrl+Shift+S`：一次性收起 / 展开 OVERVIEW 指标条与 STREAMS 流卡片，DATAVIEW 因 `Layout.fillHeight` 自动补满腾出的高度（约 230–350 px，实测可见帧行 6 → 26）。收起后折叠头仍显示「来源 · N 条流 · M 包」摘要；NOTICE 提示条常显。窗口高度 <780 逻辑像素且未手动切换过时自动折叠，手动切换后以用户选择为准 |
-| 「ALIGNMENT / 对齐诊断」折叠头 | 分析完成后出现，默认只占一行（时间基准 + 错误/警告数），点击展开墙上时钟起止、每条流的起始偏移 / 时钟漂移 / 最大空档与问题列表。无 PDT 显示「相对时间轴」；有 PDT 显示「PDT 绝对时钟」 |
-| 「配置」 | 连接 / 无数据 / 探测三个超时、最大帧数、最大解码帧数、RTSP over TCP、自动重连、`K=V` 高级选项；**下次分析生效** |
+| 顶栏「单流分析 / 多流对比」 | 切换模式。多流对比时 SOURCE 面板增加 B 路输入（本地文件或流地址，可单独勾选 cstore），一次「对比解析」同时分析 A / B 并各自产出帧信息 |
+| 工具栏「源 A / 源 B」 | 仅在多流对比模式出现，切换帧表显示 A 还是 B 的独立 frame store；与「视频 / 音频」组合即可分别查看两路的逐帧数据 |
+| 「DUAL SOURCE / 双路状态」 | 多流对比模式下显示，A/B 两卡片列出包数、流数、视频/音频帧数与解析状态，点击卡片切换当前帧表 |
+| 「ALIGNMENT / 对齐诊断」折叠头 | 分析完成后出现，默认只占一行（时间基准 + 错误/警告数），点击展开墙上时钟起止、每条流的起始偏移 / 时钟漂移 / 最大空档与问题列表；若做了两文件对比，底部另出 `COMPARISON / 双路对比` 卡片（方法 / 偏移 / 置信度 / 重叠 / 说明、A/B 包数/流数/帧数与 Δ，以及 10s 窗口偏移曲线、漂移、最大偏差与最多 3 段异常时段）。无 PDT 显示「相对时间轴」；有 PDT 显示「PDT 绝对时钟」 |
+| 「配置」 | 连接 / 无数据 / 探测三个超时、最大帧数、最大解码帧数、RTSP over TCP、自动重连、`K=V` 高级选项；**下次分析生效**。第二路输入与可选人工锚点 ms 都在 SOURCE 面板的 B 行 |
 | 提示条「详情」 | toast 展示完整诊断：错误码 / 阶段 / 原生码 / 地址 / `open Xs · probe Ys · demux Zs` |
 
 帧表 `type` 列同步读取**每个 packet 自己的 slice header**（H.264/H.265 `slice_type`、MPEG-1/2 `picture_coding_type`、全 I 编码直通 `I`），因此 `I` / `P` / `B` 都与该行的时间戳严格对应；`AV_PKT_FLAG_KEY` 作为权威兜底，保证真 IDR 不会被误标成 `P`。无法识别的码流才显示 `-`。概览「关键帧」独立按 `keyframe` 计数，不受 P/B 标签影响。**不用 `AVCodecParserContext`、也不用解码器输出**：`av_parser_parse2()` 吐出的是上一帧且 `pict_type` 会保持到下一帧被识别，贴到当前包行会造成帧类型与时间戳错配（实测 1 s GOP 的 RTSP 流出现「开头 3 个 I、之后每 GOP 2 个 I」）；增量快照行一经发布也无法事后回填。实现见 `infra/include/ma/infra/SliceType.hpp`，回归见 `tests/slice_type_test.cpp` / `tests/pict_type_test.py`。
@@ -348,6 +351,10 @@ JSON 信封（成功路径，节选）：
 | 配置里「最大解码帧数」 | `--max-decode-frames N` |
 | 配置里三个超时 | `--connect-timeout/--stall-timeout/--probe-timeout` |
 | 高级选项 `rtsp_transport=tcp` | `--opt rtsp_transport=tcp` |
+| 多流对比模式的 B 路输入（文件 / 流 / cstore key） | `--compare <file>`（CLI 仍只对比时间轴；GUI 额外输出 B 路帧表） |
+| 同项填「人工锚点 ms」 | `--anchor-ms N` |
+| 留空锚点时自动按 PDT / 关键帧签名对齐 | CLI 与 GUI 共用 `compareTimelines()`，无 PDT 时匹配相同关键帧的包大小与帧类型推算偏移 |
+| 高级选项「cstore 录制回捞」 | `--cstore`（+ `--fetch-*`） |
 
 ---
 

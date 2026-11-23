@@ -25,6 +25,7 @@
 #include <string>
 #include <thread>
 
+#include "ma/core/Alignment.hpp"
 #include "ma/core/Analyzer.hpp"
 #include "ma/core/Result.hpp"
 #include "ma/core/Serialization.hpp"
@@ -40,6 +41,14 @@ namespace {
 // Emit one JSON line to stdout and flush (pipes are not line-buffered).
 void emitLine(const std::string& line) {
     std::cout << line << "\n" << std::flush;
+}
+
+// Dual-source mode sends the second recording's snapshots/result through the
+// same stdout channel. `source` lets the GUI route them to a second table
+// model instead of overwriting the primary file's rows.
+std::string withSource(const std::string& json, const char* source) {
+    if (json.empty() || json.front() != '{') return json;
+    return "{\"source\":\"" + std::string(source) + "\"," + json.substr(1);
 }
 
 }  // namespace
@@ -215,10 +224,124 @@ int main() {
                             (outcome.diag.hint.empty() ? "" : " | " + outcome.diag.hint);
     }
 
+    // Optional cross-file alignment. The CLI still analyzes B silently and
+    // only returns the comparison; GUI dual-source mode (compareFullOutput)
+    // additionally streams B's snapshots and a full result tagged source:"B"
+    // so the second recording gets its own frame table.
+    ma::TimelineComparison comparison;
+    const ma::TimelineComparison* cmpPtr = nullptr;
+    if (!opts.compareInput.empty() && outcome.ok()) {
+        auto cmpOpts = opts;
+        cmpOpts.enableAlignment = true;
+        cmpOpts.compareInput.clear();  // never recurse
+        cmpOpts.hasAnchorMs = false;
+        cmpOpts.anchorMs = 0.0;
+        cmpOpts.source.clear();        // filled below only for a cstore key
+
+        std::string secondInput = opts.compareInput;
+        std::string secondFetchNotes;
+        bool secondReady = true;
+
+        if (opts.compareSource == "cstore") {
+            MA_LOGI("worker", "cstore fetch B key="
+                                  << ma::infra::redact(secondInput));
+            emitLine(withSource(
+                "{\"type\":\"fetch\",\"phase\":\"start\",\"done\":0,\"total\":0}",
+                "B"));
+            auto fetched = ma::infra::fetchCstoreRecording(
+                secondInput, cmpOpts, &cancel,
+                [](int done, int total, const std::string& phase) {
+                    emitLine(withSource(
+                        "{\"type\":\"fetch\",\"phase\":\"" + phase +
+                            "\",\"done\":" + std::to_string(done) +
+                            ",\"total\":" + std::to_string(total) + "}",
+                        "B"));
+                });
+            if (!fetched.ok()) {
+                secondReady = false;
+                ma::Outcome<ma::AnalysisResult> fail;
+                fail.diag = fetched.diag;
+                fail.diag.stage = ma::Stage::Open;
+                MA_LOGE("worker", "cstore fetch B failed: "
+                                      << ma::infra::redact(fail.diag.message));
+                if (opts.compareFullOutput)
+                    emitLine(withSource(
+                        ma::core::toJson(fail.value, fail.diag, false, "result"),
+                        "B"));
+            } else {
+                secondFetchNotes = ma::infra::describeFetch(*fetched);
+                secondInput = fetched->localPlaylist;
+                emitLine(withSource(
+                    "{\"type\":\"fetch\",\"phase\":\"done\",\"done\":" +
+                        std::to_string(fetched->segmentsDownloaded) +
+                        ",\"total\":" + std::to_string(fetched->segmentsTotal) +
+                        ",\"note\":" + ma::core::jsonQuote(secondFetchNotes) + "}",
+                    "B"));
+            }
+        }
+
+        if (secondReady) {
+            ma::ProgressFn secondProgress;
+            ma::SnapshotFn secondSnapshot;
+            if (opts.compareFullOutput) {
+                secondProgress = [](const ma::Progress& p) {
+                    emitLine(withSource(
+                        "{\"type\":\"progress\",\"packetsRead\":" +
+                            std::to_string(p.packetsRead) + ",\"elapsed\":" +
+                            std::to_string(p.elapsedSeconds) + "}",
+                        "B"));
+                };
+                secondSnapshot = [](const ma::AnalysisSnapshot& s) {
+                    ma::Diagnostic ok;
+                    ok.code = ma::Errc::Ok;
+                    ok.stage = ma::Stage::None;
+                    if (s.hasStreams)
+                        emitLine(withSource(
+                            ma::core::toJson(s.header, ok, false, "streams"),
+                            "B"));
+                    if (!s.newFrames.empty()) {
+                        ma::AnalysisResult batch;
+                        batch.frames = s.newFrames;
+                        batch.totalPacketsRead = s.packetsRead;
+                        batch.timings.totalSeconds = s.elapsedSeconds;
+                        emitLine(withSource(
+                            ma::core::toJson(batch, ok, true, "frames"), "B"));
+                    }
+                };
+            }
+            auto second = analyzer->analyze(secondInput, cmpOpts, &cancel,
+                                            secondProgress, secondSnapshot);
+            if (!secondFetchNotes.empty())
+                second.diag.hint = secondFetchNotes +
+                    (second.diag.hint.empty() ? "" : " | " + second.diag.hint);
+            if (opts.compareFullOutput)
+                emitLine(withSource(
+                    ma::core::toJson(second.value, second.diag, true, "result",
+                                     ma::infra::ffmpegVersionString(), 0),
+                    "B"));
+
+            const ma::AlignmentReport emptyA, emptyB;
+            const ma::AlignmentReport& A =
+                outcome.value.alignment ? *outcome.value.alignment : emptyA;
+            const ma::AlignmentReport& B =
+                second.value.alignment ? *second.value.alignment : emptyB;
+            std::optional<double> anchor;
+            if (opts.hasAnchorMs) anchor = opts.anchorMs;
+            comparison = ma::compareTimelines(A, B, anchor,
+                                              &outcome.value, &second.value);
+            cmpPtr = &comparison;
+            MA_LOGI("worker", "compare method=" << comparison.method
+                               << " offsetMs=" << comparison.offsetMs
+                               << " confidence=" << comparison.confidence
+                               << " secondOk=" << second.ok());
+        }
+    }
+
     // Always emit a final result line (ok or structured error). The GUI treats
     // a worker process that exits WITHOUT a result line as a crash.
     emitLine(ma::core::toJson(outcome.value, outcome.diag, /*withFrames=*/true,
-                              "result"));
+                              "result", ma::infra::ffmpegVersionString(), 0,
+                              cmpPtr));
 
     // The reader thread is still blocked in std::getline() waiting for a
     // "cancel" line. Joining it would keep this process alive for as long as the

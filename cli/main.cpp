@@ -392,7 +392,8 @@ int main(int argc, char** argv) {
             outcome.value.alignment ? *outcome.value.alignment : emptyA;
         const ma::AlignmentReport& B =
             second.value.alignment ? *second.value.alignment : emptyB;
-        comparison = ma::compareTimelines(A, B, args.anchorMs);
+        comparison = ma::compareTimelines(A, B, args.anchorMs,
+                                          &outcome.value, &second.value);
         cmpPtr = &comparison;
         MA_LOGI("cli", "compare method=" << comparison.method
                         << " offsetMs=" << comparison.offsetMs

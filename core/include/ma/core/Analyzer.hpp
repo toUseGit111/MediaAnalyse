@@ -52,6 +52,23 @@ struct AnalysisOptions {
     std::string fetchDir;
     int fetchJobs = 4;                // parallel segment downloads, 1..16
     double fetchTimeout = 30.0;       // seconds, per HTTP request
+
+    // Optional second recording for cross-file alignment. Empty = single-file
+    // analysis. When set, the caller analyzes BOTH inputs and compares their
+    // timelines (see compareTimelines in Alignment.hpp). `anchorMs` is the
+    // operator-supplied common event used only when the files carry no PDT;
+    // negative = B starts later, positive = A starts later. It is emitted in
+    // the result only as a low-confidence "manual-anchor" comparison.
+    std::string compareInput;
+    bool hasAnchorMs = false;
+    double anchorMs = 0.0;
+    // "cstore" makes the second input go through the same recording fetcher as
+    // the primary source. Empty = the second input is a plain file or URL.
+    std::string compareSource;
+    // GUI dual-source mode: the worker publishes the second recording's full
+    // frame list (tagged source:"B") instead of silently analyzing it only for
+    // alignment. The CLI leaves this false, so its wire behaviour is unchanged.
+    bool compareFullOutput = false;
 };
 
 struct Progress {

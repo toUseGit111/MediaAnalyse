@@ -30,15 +30,36 @@ ApplicationWindow {
     // ---------------- state ----------------
     property bool isUrlMode: false
     property bool cstoreMode: false
+    // Single-source analysis vs. dual-source comparison. The toggle is in the
+    // app bar; dual mode runs both inputs through ONE worker and keeps two
+    // independent frame stores/tables.
+    property bool compareMode: false
+    property bool compareCstoreMode: false
+    property int activeSource: 0          // 0 = A (primary), 1 = B (compare)
     property string fetchText: ""
     property int tabIndex: 0
     property var streamList: []
     property var summary: ({})
+    property var streamListB: []
+    property var summaryB: ({})
+    property var errorDiagB: ({})
+    property bool anyBusy: Analysis.busy || (root.compareMode && AnalysisB.busy)
+    property var activeAnalysis: (root.compareMode && root.activeSource === 1)
+                                 ? AnalysisB : Analysis
+    property var activeSummary: (root.compareMode && root.activeSource === 1)
+                                ? root.summaryB : root.summary
+    property var activeStreamList: (root.compareMode && root.activeSource === 1)
+                                   ? root.streamListB : root.streamList
     // HLS timeline / A-V alignment report, filled only by a finished result.
     // Live snapshots deliberately leave it empty, so the card stays hidden
     // until there is a complete timeline to judge.
     property var alignment: (root.summary && root.summary.alignment)
                             ? root.summary.alignment : ({})
+    // Cross-file comparison, present only when a second file was analyzed.
+    property var comparison: (root.summary && root.summary.comparison)
+                             ? root.summary.comparison : ({})
+    property var alignmentB: (root.summaryB && root.summaryB.alignment)
+                             ? root.summaryB.alignment : ({})
     property var errorDiag: ({})
     property bool noticeDismissed: false
     property bool decodeOn: false
@@ -53,16 +74,39 @@ ApplicationWindow {
         var src = root.isUrlMode
             ? (root.proto.ok ? root.proto.name : "网络流")
             : (s.formatName ? root.shortFormat(s.formatName) : "本地文件")
-        return src + " · " + root.streamList.length + " 条流 · " +
-               root.group(s.totalPackets || 0) + " 包"
+        var d = src + " · " + root.streamList.length + " 条流 · " +
+                root.group(s.totalPackets || 0) + " 包"
+        if (root.compareMode)
+            d += " · A/B " + root.streamList.length + "/" +
+                 root.streamListB.length + " 流"
+        return d
     }
 
     function toggleSummary() {
         summaryPanel.expanded = !summaryPanel.expanded
         root.summaryUserSet = true
     }
+
+    function toggleCompareMode() {
+        if (root.anyBusy) return
+        root.compareMode = !root.compareMode
+        root.activeSource = 0
+        root.resetSelection()
+        if (root.compareMode)
+            root.showToast("多流对比：填写 A / B 两路输入后点击「对比解析」")
+    }
+
+    function rowsForSource(src, video) {
+        var c = (src === 1) ? AnalysisB : Analysis
+        return video ? c.videoRows : c.audioRows
+    }
     property var proto: root.isUrlMode ? root.detectProto(urlField.text)
                                        : { name: "", rule: "", ok: false, empty: true }
+    property var activeProto: (root.compareMode && root.activeSource === 1)
+        ? (root.compareCstoreMode
+           ? { name: "cstore", rule: "录制分片回捞", ok: true, empty: false }
+           : root.detectProto(compareField.text))
+        : root.proto
 
     // ---- QTableWidget-style rectangular CELL selection ----
     property int selR0: -1
@@ -154,8 +198,8 @@ ApplicationWindow {
 
     function copySelection() {
         if (root.selR0 < 0) return
-        Analysis.copySelection(root.selOnVideo, root.selR0, root.selR1,
-                               root.selC0, root.selC1)
+        root.activeAnalysis.copySelection(root.selOnVideo, root.selR0, root.selR1,
+                                          root.selC0, root.selC1)
         root.showToast("已复制 " + (root.selR1 - root.selR0 + 1) + " 行 TSV 到剪贴板")
     }
 
@@ -190,6 +234,10 @@ ApplicationWindow {
     // ---------------- helpers ----------------
     function group(n) {
         return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",")
+    }
+    function signedGroup(n) {
+        var v = Math.round(Number(n || 0))
+        return (v > 0 ? "+" : "") + root.group(v)
     }
     function clock(seconds) {
         var s = Math.max(0, Number(seconds || 0))
@@ -247,13 +295,15 @@ ApplicationWindow {
 
     // ---------------- derived view model ----------------
     property bool hasResult: root.summary && root.summary.formatName !== undefined
+    property bool activeHasResult: root.activeSummary &&
+                                   root.activeSummary.formatName !== undefined
     property string appbarTag: root.isUrlMode
         ? (root.proto.ok ? root.proto.name + " 实时流 · 帧解析中" : "地址协议未识别")
         : "本地文件 · 离线解析"
 
     function computeMetrics() {
-        var s = root.summary || ({})
-        var p = root.proto || ({})
+        var s = root.activeSummary || ({})
+        var p = root.activeProto || ({})
         var has = root.hasResult
         var br = Number(s.bitrate || 0)
         var elapsed = Number(s.elapsedSeconds || 0)
@@ -262,7 +312,7 @@ ApplicationWindow {
             return [
                 { label: "时长", value: "LIVE", unit: "", note: "持续流 · 无固定时长", accent: false, live: true, size: 20 },
                 { label: "平均码率", value: br > 0 ? (br / 1000000).toFixed(2) : "—", unit: "Mb/s", note: "容器 / 逐包统计", accent: false, live: false, size: 20 },
-                { label: "已解析包数", value: has ? root.group(s.totalPackets || 0) : "0", unit: "", note: Analysis.busy ? "持续增长" : (s.stopped ? "已停止" : "—"), accent: false, live: false, size: 20 },
+                { label: "已解析包数", value: has ? root.group(s.totalPackets || 0) : "0", unit: "", note: root.anyBusy ? "持续增长" : (s.stopped ? "已停止" : "—"), accent: false, live: false, size: 20 },
                 { label: "已解析帧数", value: has ? root.group(s.videoFrames || 0) : "0", unit: "帧", note: "含 " + root.group(s.keyFrames || 0) + " 个关键帧", accent: true, live: false, size: 20 },
                 { label: "接入协议", value: p.ok ? p.name : (p.empty ? "待输入" : "未识别"), unit: "", note: p.ok ? "auto · " + p.rule : "地址无法识别", accent: false, live: false, size: 14 }
             ]
@@ -278,9 +328,20 @@ ApplicationWindow {
     property var metrics: root.computeMetrics()
 
     property string overviewTail: {
-        if (root.errorDiag && root.errorDiag.code) return "解析失败 · " + root.errorDiag.code
-        if (Analysis.busy) return root.fetchText !== ""
-            ? root.fetchText : ("解析中 · " + Analysis.statusText)
+        var activeDiag = (root.compareMode && root.activeSource === 1)
+                         ? root.errorDiagB : root.errorDiag
+        if (activeDiag && activeDiag.code)
+            return (root.compareMode ? (root.activeSource === 1 ? "B " : "A ") : "") +
+                   "解析失败 · " + activeDiag.code
+        if (root.anyBusy) return root.fetchText !== ""
+            ? root.fetchText : (root.compareMode ? "对比解析中 · 两路独立帧表" :
+                                ("解析中 · " + Analysis.statusText))
+        if (root.compareMode)
+            return root.activeHasResult
+                ? (root.activeSource === 1 ? "B " : "A ") + "解析完成 · " +
+                  root.group(root.activeSummary.totalPackets || 0) + " packets in " +
+                  Number(root.activeSummary.elapsedSeconds || 0).toFixed(2) + " s"
+                : "等待 A / B 两路输入"
         if (root.isUrlMode)
             return root.proto.ok ? "实时解析 · " + Number(root.summary.frameRate || 0).toFixed(1) + " fps"
                                  : "等待有效的流地址"
@@ -288,12 +349,27 @@ ApplicationWindow {
             ? "解析完成 · " + root.group(root.summary.totalPackets || 0) + " packets in " + Number(root.summary.elapsedSeconds || 0).toFixed(2) + " s"
             : "等待输入"
     }
-    property color overviewColor: (root.errorDiag && root.errorDiag.code) ? Theme.error
-        : (Analysis.busy ? Theme.accent : (root.hasResult || !root.isUrlMode ? Theme.success : Theme.text4))
+    property color overviewColor: {
+        var activeDiag = (root.compareMode && root.activeSource === 1)
+                         ? root.errorDiagB : root.errorDiag
+        if (activeDiag && activeDiag.code) return Theme.error
+        if (root.anyBusy) return Theme.accent
+        return (root.activeHasResult || !root.isUrlMode) ? Theme.success : Theme.text4
+    }
 
     function computeNotice() {
         var s = root.summary || ({})
         var p = root.proto || ({})
+        if (root.compareMode && root.errorDiagB && root.errorDiagB.code) {
+            var b = root.errorDiagB
+            return {
+                kind: "error", title: "B 源解析失败",
+                body: (b.message || "") + (b.hint ? " · " + b.hint : ""),
+                detail: "阶段 " + (b.stage || "-") + " · 错误码 " +
+                        (b.code || "-") + " (" + (b.nativeCode || 0) + ") · 耗时 " +
+                        Number(b.elapsedSeconds || 0).toFixed(2) + " s · " + (b.url || "")
+            }
+        }
         if (root.errorDiag && root.errorDiag.code) {
             return {
                 kind: "error", title: "解析失败",
@@ -365,24 +441,43 @@ ApplicationWindow {
     property string selectionText: root.selR0 >= 0
         ? (root.selR1 - root.selR0 + 1) + " 行 × " + (root.selC1 - root.selC0 + 1) + " 列 已选"
         : "未选择"
-    property string rowCountText: (root.tabIndex === 0 ? Analysis.videoRows : Analysis.audioRows)
+    property string rowCountText: (root.tabIndex === 0
+                                   ? root.activeAnalysis.videoRows
+                                   : root.activeAnalysis.audioRows)
                                   + " 行 · " + Analysis.columnCountFor(true) + " 列" +
                                   (root.filterText.length > 0 ? "（已过滤）" : "")
     property string stateText: {
         if (root.errorDiag && root.errorDiag.code) return "解析失败"
-        if (Analysis.busy) return Analysis.stopping ? "正在停止" :
+        if (root.compareMode) {
+            if (root.anyBusy) return Analysis.stopping ? "正在停止两路解析" : "对比解析中"
+            if (root.errorDiagB && root.errorDiagB.code) return "B 解析失败"
+            if (root.errorDiag && root.errorDiag.code) return "A 解析失败"
+            return root.activeHasResult ? "A/B 就绪 · " + (root.activeSource === 1 ? "B" : "A") + " 表" : "A/B 就绪"
+        }
+        if (root.anyBusy) return Analysis.stopping ? "正在停止" :
             (root.isUrlMode ? "LIVE · 帧解析中" : "解析中")
         if (root.summary.stopped) return "已停止 · 部分结果"
         return root.isUrlMode ? "LIVE · 待连接" : "就绪"
     }
-    property color stateColor: (root.errorDiag && root.errorDiag.code) ? Theme.error
-        : (Analysis.busy || root.summary.stopped ? Theme.accent : Theme.success)
+    property color stateColor: (root.errorDiag && root.errorDiag.code ||
+                                root.compareMode && root.errorDiagB && root.errorDiagB.code) ? Theme.error
+        : (root.anyBusy || root.summary.stopped ? Theme.accent : Theme.success)
 
     // ---------------- actions ----------------
     function startAnalysis() {
+        if (root.compareMode && compareField.text.trim().length === 0) {
+            compareField.forceActiveFocus()
+            root.showToast("请先填写第二路流或文件路径")
+            return
+        }
         root.errorDiag = ({})
+        root.errorDiagB = ({})
         root.fetchText = ""
         root.noticeDismissed = false
+        if (root.compareMode) {
+            root.summaryB = ({})
+            root.streamListB = []
+        }
         var opts = ({
             connectTimeout: connectSpin.value,
             stallTimeout: stallSpin.value,
@@ -393,7 +488,14 @@ ApplicationWindow {
             extraOptions: root.parseExtra(extraField.text),
             source: root.cstoreMode ? "cstore" : "",
             fetchDir: fetchDirField.text.trim(),
-            fetchJobs: fetchJobsSpin.value
+            fetchJobs: fetchJobsSpin.value,
+            compareInput: compareField.text.trim(),
+            compareSource: root.compareCstoreMode ? "cstore" : "",
+            compareFullOutput: root.compareMode,
+            hasAnchorMs: (root.compareMode ? compareAnchorField.text.trim()
+                                           : anchorField.text.trim()).length > 0,
+            anchorMs: Number((root.compareMode ? compareAnchorField.text
+                                               : anchorField.text).trim())
         })
         var input = root.cstoreMode ? urlField.text.trim()
                                     : (root.isUrlMode ? urlField.text.trim()
@@ -401,8 +503,15 @@ ApplicationWindow {
         Analysis.start(input, opts)
     }
 
+    function stopAll() {
+        if (!root.anyBusy) return
+        // The primary controller's cancel also flips the secondary controller
+        // into the stopping state; one cooperative cancel stops both inputs.
+        Analysis.cancel()
+    }
+
     function openClicked() {
-        if (Analysis.busy) return       // Stop is a separate button now
+        if (root.anyBusy) return        // Stop is a separate button now
         if (root.isUrlMode || root.cstoreMode) {
             if (urlField.text.trim().length === 0) { urlField.forceActiveFocus(); return }
         } else {
@@ -418,10 +527,17 @@ ApplicationWindow {
         if (picked && picked.length > 0) pathField.text = picked
     }
 
+    function browseCompareOnly() {
+        var picked = Analysis.pickMediaFile()
+        if (picked && picked.length > 0) compareField.text = picked
+    }
+
     function applyFilter() {
         root.resetSelection()
         Analysis.setFilter(true, root.filterText)
         Analysis.setFilter(false, root.filterText)
+        AnalysisB.setFilter(true, root.filterText)
+        AnalysisB.setFilter(false, root.filterText)
         videoGrid.table.contentY = 0
         audioGrid.table.contentY = 0
         videoGrid.table.contentX = 0
@@ -565,9 +681,19 @@ ApplicationWindow {
                     font.pixelSize: 10
                     font.letterSpacing: 1.2
                 }
+                PrismButton {
+                    Layout.leftMargin: 6
+                    compact: true
+                    variant: "toggle"
+                    toggled: root.compareMode
+                    text: root.compareMode ? "◉ 多流对比" : "◌ 单流分析"
+                    onClicked: root.toggleCompareMode()
+                    ToolTip.text: "切换单流分析与 A/B 双流（双文件）对比"
+                    ToolTip.visible: hovered
+                }
                 Rectangle { width: 1; height: 18; color: Theme.line2; Layout.leftMargin: 4; Layout.rightMargin: 4 }
                 Text {
-                    text: root.appbarTag
+                    text: root.compareMode ? "A/B 双源 · 独立帧表" : root.appbarTag
                     color: Theme.text3
                     font.family: Theme.uiFont
                     font.pixelSize: 11
@@ -606,7 +732,9 @@ ApplicationWindow {
 
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: root.isUrlMode ? 146 : 172
+                Layout.preferredHeight: root.compareMode
+                                        ? (root.isUrlMode ? 232 : 258)
+                                        : (root.isUrlMode ? 146 : 172)
                 color: Theme.surface1
                 radius: 8
                 border.color: Theme.line
@@ -616,6 +744,7 @@ ApplicationWindow {
                     id: sourceStack
                     anchors.fill: parent
                     anchors.margins: 13
+                    anchors.bottomMargin: root.compareMode ? 82 : 13
                     currentIndex: root.isUrlMode ? 1 : 0
 
                     // ----- LOCAL FILE -----
@@ -659,7 +788,7 @@ ApplicationWindow {
                                         font.pixelSize: 12
                                         selectByMouse: true
                                         background: Item {}
-                                        onAccepted: { if (!Analysis.busy) root.startAnalysis() }
+                                        onAccepted: { if (!root.anyBusy) root.startAnalysis() }
                                     }
                                     Rectangle {
                                         visible: root.fileExt(pathField.text) !== "—"
@@ -684,7 +813,7 @@ ApplicationWindow {
                             PrismButton {
                                 text: "打开"
                                 variant: "primary"
-                                enabled: !Analysis.busy
+                                enabled: !root.anyBusy
                                 onClicked: root.openClicked()
                             }
                         }
@@ -728,15 +857,15 @@ ApplicationWindow {
                             }
                             Item { Layout.fillWidth: true }
                             Text {
-                                visible: !Analysis.busy
+                                visible: !root.anyBusy
                                 text: "离线文件 · 可随机访问任意时间点"
                                 color: Theme.text4; font.family: Theme.uiFont; font.pixelSize: 11
                             }
                             PrismButton {
-                                visible: Analysis.busy
+                                visible: root.anyBusy
                                 text: Analysis.stopping ? "正在停止…" : "停止解析"
                                 variant: "ghost"; compact: true
-                                onClicked: Analysis.cancel()
+                                onClicked: root.stopAll()
                             }
                         }
                     }
@@ -783,7 +912,7 @@ ApplicationWindow {
                                         font.pixelSize: 12
                                         selectByMouse: true
                                         background: Item {}
-                                        onAccepted: { if (!Analysis.busy) root.openClicked() }
+                                        onAccepted: { if (!root.anyBusy) root.openClicked() }
                                     }
                                 }
                             }
@@ -807,7 +936,7 @@ ApplicationWindow {
                             PrismButton {
                                 text: "解析"
                                 variant: "primary"
-                                enabled: !Analysis.busy
+                                enabled: !root.anyBusy
                                 onClicked: root.openClicked()
                                 ToolTip.text: "协议未识别时仍会交给 FFmpeg 尝试（内部排障）"
                                 ToolTip.visible: hovered && !root.proto.ok
@@ -850,12 +979,105 @@ ApplicationWindow {
                             }
                             Item { Layout.fillWidth: true }
                             PrismButton {
-                                visible: Analysis.busy
+                                visible: root.anyBusy
                                 text: Analysis.stopping ? "正在停止…" : "停止解析"
                                 variant: "ghost"; compact: true
-                                onClicked: Analysis.cancel()
+                                onClicked: root.stopAll()
                             }
                         }
+                    }
+                }
+
+                // B 路输入：多流对比模式专用。A 继续保持原有的本地文件 /
+                // 网络流切换，B 接受本地文件或任意流地址，也可切换为 cstore 键。
+                ColumnLayout {
+                    visible: root.compareMode
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.leftMargin: 13
+                    anchors.rightMargin: 13
+                    anchors.bottomMargin: 11
+                    spacing: 6
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Rectangle {
+                            width: 20; height: 20; radius: 4
+                            color: Theme.video; border.color: Theme.accentEdge
+                            Text { anchors.centerIn: parent; text: "B"; color: Theme.surface1; font.pixelSize: 11; font.bold: true }
+                        }
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Theme.controlHeight
+                            radius: 6
+                            color: Theme.sunken
+                            border.color: compareField.activeFocus ? Theme.accent : Theme.line2
+                            border.width: 1
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 8
+                                spacing: 8
+                                Text { text: "◎"; color: Theme.text3; font.pixelSize: 13 }
+                                TextField {
+                                    id: compareField
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 32
+                                    placeholderText: root.compareCstoreMode
+                                        ? "第二路 cstore 对象键（如 seewo-edulyse/xxx.m3u8）"
+                                        : "第二路：本地文件路径或 rtsp:// · rtmp:// · .m3u8 · .flv"
+                                    placeholderTextColor: Theme.text3
+                                    color: Theme.text1
+                                    font.family: Theme.monoFont
+                                    font.pixelSize: 12
+                                    selectByMouse: true
+                                    background: Item {}
+                                    onAccepted: { if (!root.anyBusy) root.startAnalysis() }
+                                }
+                            }
+                        }
+                        PrismButton {
+                            compact: true; variant: "toggle"
+                            toggled: root.compareCstoreMode
+                            text: root.compareCstoreMode ? "✓ cstore" : "cstore"
+                            onClicked: root.compareCstoreMode = !root.compareCstoreMode
+                            ToolTip.text: "第二路也走分片回捞；关闭时按普通文件/流地址处理"
+                            ToolTip.visible: hovered
+                        }
+                        TextField {
+                            id: compareAnchorField
+                            Layout.preferredWidth: 96
+                            Layout.preferredHeight: Theme.controlHeight
+                            placeholderText: "锚点 ms"
+                            placeholderTextColor: Theme.text4
+                            color: Theme.text1
+                            font.family: Theme.monoFont
+                            font.pixelSize: 11
+                            selectByMouse: true
+                            validator: DoubleValidator { }
+                            ToolTip.text: "无 PDT 且帧签名也无法匹配时，填两路共同事件的毫秒偏移（B 晚于 A 为正）"
+                            ToolTip.visible: hovered
+                            background: Rectangle {
+                                radius: 6; color: Theme.sunken
+                                border.color: compareAnchorField.activeFocus ? Theme.accent : Theme.line2
+                            }
+                        }
+                        PrismButton {
+                            text: "浏览…"; variant: "secondary"; compact: true
+                            onClicked: root.browseCompareOnly()
+                        }
+                        PrismButton {
+                            text: "对比解析"; variant: "primary"
+                            enabled: !root.anyBusy
+                            onClicked: root.startAnalysis()
+                        }
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: "A / B 独立解析并分别输出帧表；「A / B」切源、「视频 / 音频」切帧类型。锚点可留空：优先 PDT，再尝试相同帧签名自动对齐。"
+                        color: Theme.text3; font.family: Theme.uiFont; font.pixelSize: 11
+                        elide: Text.ElideRight
                     }
                 }
             }
@@ -1010,6 +1232,80 @@ ApplicationWindow {
                     }
                 }
 
+                // DUAL SOURCE：A/B 两路各自的状态摘要，点击卡片切换帧表数据源。
+                ColumnLayout {
+                    visible: root.compareMode && summaryPanel.expanded
+                    Layout.fillWidth: true
+                    spacing: 8
+                    SectionHead {
+                        label: "DUAL SOURCE / 双路状态"
+                        tail: "点击 A / B 卡片切换帧表"
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Repeater {
+                            model: 2
+                            Rectangle {
+                                id: sourceCard
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 66
+                                radius: 7
+                                color: (root.activeSource === index) ? Theme.surface2 : Theme.sunken
+                                border.color: (root.activeSource === index) ? Theme.accentEdge : Theme.line
+                                border.width: 1
+                                property bool isB: index === 1
+                                property var s: isB ? root.summaryB : root.summary
+                                property var sl: isB ? root.streamListB : root.streamList
+                                property var diag: isB ? root.errorDiagB : root.errorDiag
+                                ColumnLayout {
+                                    anchors.fill: parent
+                                    anchors.margins: 9
+                                    spacing: 3
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Rectangle {
+                                            width: 16; height: 16; radius: 3
+                                            color: sourceCard.isB ? Theme.video : Theme.accent
+                                            Text { anchors.centerIn: parent; text: sourceCard.isB ? "B" : "A"; color: Theme.surface1; font.pixelSize: 10; font.bold: true }
+                                        }
+                                        Text {
+                                            text: sourceCard.isB
+                                                  ? (root.compareCstoreMode ? "第二路 · cstore" : "第二路 · 文件/流")
+                                                  : (root.cstoreMode ? "第一路 · cstore" : (root.isUrlMode ? "第一路 · 网络流" : "第一路 · 本地文件"))
+                                            color: Theme.text2; font.family: Theme.uiFont; font.pixelSize: 11; font.bold: true
+                                        }
+                                        Item { Layout.fillWidth: true }
+                                        Text {
+                                            text: (sourceCard.diag && sourceCard.diag.code)
+                                                  ? "失败 " + sourceCard.diag.code
+                                                  : ((sourceCard.s && sourceCard.s.formatName !== undefined)
+                                                     ? "完成" : (root.anyBusy ? "解析中" : "等待"))
+                                            color: (sourceCard.diag && sourceCard.diag.code)
+                                                   ? Theme.error : Theme.text3
+                                            font.family: Theme.monoFont; font.pixelSize: 10
+                                        }
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: root.group(sourceCard.s ? (sourceCard.s.totalPackets || 0) : 0) +
+                                              " 包 · " + sourceCard.sl.length + " 流 · " +
+                                              root.group(sourceCard.s ? (sourceCard.s.videoFrames || 0) : 0) + " 视频帧 / " +
+                                              root.group(sourceCard.s ? (sourceCard.s.audioFrames || 0) : 0) + " 音频帧"
+                                        color: Theme.text3; font.family: Theme.monoFont; font.pixelSize: 10
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: { root.activeSource = index; root.resetSelection() }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // 04 NOTICE —— 常显，不随折叠隐藏：警告 / 错误 / 停止提示
                 // 属于全局状态，收起概览时仍必须可见。
                 Rectangle {
@@ -1066,8 +1362,8 @@ ApplicationWindow {
                     visible: summaryPanel.expanded
                     spacing: 12
                     SectionHead {
-                        label: "STREAMS / 流信息"
-                        tail: root.streamList.length + " 条流"
+                        label: "STREAMS / 流信息" + (root.compareMode ? " · " + (root.activeSource === 1 ? "B" : "A") : "")
+                        tail: root.activeStreamList.length + " 条流"
                     }
                     Item {
                         Layout.fillWidth: true
@@ -1077,14 +1373,14 @@ ApplicationWindow {
                             width: parent.width
                             spacing: 12
                             Repeater {
-                                model: root.streamList
+                                model: root.activeStreamList
                                 StreamCard {
                                     width: (cardFlow.width - 12) / 2
                                     stream: modelData
                                 }
                             }
                             Text {
-                                visible: root.streamList.length === 0
+                                visible: root.activeStreamList.length === 0
                                 width: cardFlow.width
                                 height: 102
                                 text: "尚无流信息 · 解析后将在此显示每条流的编码、分辨率、采样率与时基"
@@ -1292,6 +1588,240 @@ ApplicationWindow {
                                 font.family: Theme.uiFont
                                 font.pixelSize: 11
                             }
+
+                            // Cross-file comparison block (only when a second
+                            // file was analyzed). Shows method, offset and the
+                            // confidence note so a low-confidence relative
+                            // result is never mistaken for an exact one.
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: cmpBody.implicitHeight + 16
+                                visible: (root.comparison.method || "").length > 0
+                                color: Theme.surface1
+                                radius: 6
+                                border.color: Theme.line2
+                                border.width: 1
+                                ColumnLayout {
+                                    id: cmpBody
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.margins: 8
+                                    spacing: 4
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: root.compareMode ? "COMPARISON / 双路对比"
+                                                               : "COMPARISON / 两文件对齐"
+                                        color: Theme.text2
+                                        font.family: Theme.uiFont
+                                        font.pixelSize: 10
+                                        font.bold: true
+                                        font.letterSpacing: 1.2
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 12
+                                        Text {
+                                            text: "方法  " + (root.comparison.method || "-")
+                                            color: root.comparison.confidence >= 1.0
+                                                   ? Theme.success
+                                                   : (root.comparison.confidence >= 0.5
+                                                      ? Theme.accent : Theme.error)
+                                            font.family: Theme.monoFont
+                                            font.pixelSize: 11
+                                        }
+                                        Text {
+                                            text: "偏移  " +
+                                                  Number(root.comparison.offsetMs || 0).toFixed(1) + " ms"
+                                            color: Theme.text1
+                                            font.family: Theme.monoFont
+                                            font.pixelSize: 11
+                                        }
+                                        Text {
+                                            text: "置信度  " +
+                                                  Number(root.comparison.confidence || 0).toFixed(2)
+                                            color: Theme.text3
+                                            font.family: Theme.monoFont
+                                            font.pixelSize: 11
+                                        }
+                                        Item { Layout.fillWidth: true }
+                                        Text {
+                                            text: "重叠  " +
+                                                  Number(root.comparison.overlapSeconds || 0).toFixed(3) + " s"
+                                            color: Theme.text3
+                                            font.family: Theme.monoFont
+                                            font.pixelSize: 11
+                                        }
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: root.comparison.note || ""
+                                        color: Theme.text3
+                                        font.family: Theme.uiFont
+                                        font.pixelSize: 11
+                                        wrapMode: Text.WordWrap
+                                    }
+                                    // 偏移随时间的变化：全局 offsetMs 看不出
+                                    // “某一段时间不同步”，这里按时间窗画曲线。
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 96
+                                        visible: (root.comparison.windows || []).length > 1
+                                        color: Theme.sunken
+                                        radius: 5
+                                        border.color: Theme.line2
+                                        Canvas {
+                                            id: offsetCanvas
+                                            anchors.fill: parent
+                                            onPaint: {
+                                                var ctx = getContext("2d")
+                                                if (!ctx) return
+                                                var W = width, H = height
+                                                ctx.clearRect(0, 0, W, H)
+                                                var wins = root.comparison.windows || []
+                                                if (wins.length < 2) return
+                                                var base = Number(root.comparison.offsetMs || 0)
+                                                var vals = []
+                                                var lo = base, hi = base
+                                                for (var i = 0; i < wins.length; ++i) {
+                                                    var v = Number(wins[i].offsetMs || 0)
+                                                    vals.push(v)
+                                                    lo = Math.min(lo, v); hi = Math.max(hi, v)
+                                                }
+                                                if (hi - lo < 20) { lo -= 10; hi += 10 }
+                                                var pad = (hi - lo) * 0.12
+                                                lo -= pad; hi += pad
+                                                var L = 8, R = 8, T = 18, B = 14
+                                                function px(i) {
+                                                    return L + (wins.length === 1 ? 0
+                                                        : i * (W - L - R) / (wins.length - 1))
+                                                }
+                                                function py(v) {
+                                                    return T + (hi - v) * (H - T - B) / (hi - lo)
+                                                }
+                                                // global reference
+                                                ctx.strokeStyle = Theme.text4
+                                                ctx.lineWidth = 1
+                                                ctx.setLineDash([4, 3])
+                                                ctx.beginPath()
+                                                ctx.moveTo(L, py(base)); ctx.lineTo(W - R, py(base))
+                                                ctx.stroke()
+                                                ctx.setLineDash([])
+                                                // offset curve
+                                                ctx.strokeStyle = Theme.accent
+                                                ctx.lineWidth = 2
+                                                ctx.beginPath()
+                                                for (var k = 0; k < vals.length; ++k) {
+                                                    if (k === 0) ctx.moveTo(px(k), py(vals[k]))
+                                                    else ctx.lineTo(px(k), py(vals[k]))
+                                                }
+                                                ctx.stroke()
+                                                // anomalous windows in red
+                                                ctx.strokeStyle = Theme.error
+                                                ctx.lineWidth = 3
+                                                var anomalies = root.comparison.anomalies || []
+                                                for (var a = 0; a < anomalies.length; ++a) {
+                                                    var st = Number(anomalies[a].start || 0)
+                                                    var en = Number(anomalies[a].end || 0)
+                                                    ctx.beginPath()
+                                                    var started = false
+                                                    for (var j = 0; j < wins.length; ++j) {
+                                                        var mid = (Number(wins[j].start || 0) +
+                                                                   Number(wins[j].end || 0)) / 2
+                                                        if (mid < st - 0.1 || mid > en + 0.1) continue
+                                                        if (started) ctx.lineTo(px(j), py(vals[j]))
+                                                        else { ctx.moveTo(px(j), py(vals[j])); started = true }
+                                                    }
+                                                    ctx.stroke()
+                                                }
+                                            }
+                                        }
+                                        Text {
+                                            anchors.left: parent.left
+                                            anchors.leftMargin: 8
+                                            anchors.top: parent.top
+                                            anchors.topMargin: 2
+                                            text: "OFFSET / 时间轴偏移（" +
+                                                  Number(root.comparison.windowSeconds || 10).toFixed(0) +
+                                                  "s 窗口，虚线=整体偏移）"
+                                            color: Theme.text3
+                                            font.family: Theme.uiFont
+                                            font.pixelSize: 10
+                                        }
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        visible: (root.comparison.windows || []).length > 1
+                                        text: "漂移 " +
+                                              Number(root.comparison.driftMsPerMin || 0).toFixed(1) +
+                                              " ms/min · 最大偏差 " +
+                                              Number(root.comparison.maxDeviationMs || 0).toFixed(1) +
+                                              " ms"
+                                        color: Theme.text2
+                                        font.family: Theme.monoFont
+                                        font.pixelSize: 10
+                                    }
+                                    Repeater {
+                                        model: (root.comparison.anomalies || []).slice(0, 3)
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 8
+                                            Text {
+                                                text: "⚠ " + root.clock(modelData.start) +
+                                                      " → " + root.clock(modelData.end)
+                                                color: Theme.error
+                                                font.family: Theme.monoFont
+                                                font.pixelSize: 10
+                                            }
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: (modelData.kind === "step" ? "突变 " : "局部偏移 ") +
+                                                      root.signedGroup(modelData.deviationMs) + " ms"
+                                                color: Theme.accent
+                                                font.family: Theme.uiFont
+                                                font.pixelSize: 10
+                                                elide: Text.ElideRight
+                                            }
+                                        }
+                                    }
+                                    // A/B 结构差异始终给出：即使没有 PDT 或帧签名，
+                                    // 两路的包数 / 帧数 / 流数仍可直接对照。
+                                    Text {
+                                        Layout.fillWidth: true
+                                        visible: root.compareMode &&
+                                                 root.summaryB.totalPackets !== undefined
+                                        text: "A  " + root.group(root.summary.totalPackets || 0) +
+                                              " 包 · " + (root.summary.streamCount || 0) + " 流 · " +
+                                              root.group(root.summary.videoFrames || 0) + "v/" +
+                                              root.group(root.summary.audioFrames || 0) + "a    |    B  " +
+                                              root.group(root.summaryB.totalPackets || 0) +
+                                              " 包 · " + (root.summaryB.streamCount || 0) + " 流 · " +
+                                              root.group(root.summaryB.videoFrames || 0) + "v/" +
+                                              root.group(root.summaryB.audioFrames || 0) + "a"
+                                        color: Theme.text2
+                                        font.family: Theme.monoFont
+                                        font.pixelSize: 10
+                                        wrapMode: Text.WordWrap
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        visible: root.compareMode &&
+                                                 root.summaryB.totalPackets !== undefined
+                                        text: "Δ 包 " + root.signedGroup(
+                                                  (root.summary.totalPackets || 0) -
+                                                  (root.summaryB.totalPackets || 0)) +
+                                              " · Δ 视频帧 " + root.signedGroup(
+                                                  (root.summary.videoFrames || 0) -
+                                                  (root.summaryB.videoFrames || 0)) +
+                                              " · Δ 音频帧 " + root.signedGroup(
+                                                  (root.summary.audioFrames || 0) -
+                                                  (root.summaryB.audioFrames || 0))
+                                        color: Theme.accent
+                                        font.family: Theme.monoFont
+                                        font.pixelSize: 10
+                                    }
+                                }
+                            }
                         }
                         } // details card
                     } // details ColumnLayout
@@ -1348,7 +1878,9 @@ ApplicationWindow {
                                 Text {
                                     id: tabCount
                                     anchors.centerIn: parent
-                                    text: root.group(index === 0 ? Analysis.videoRows : Analysis.audioRows)
+                                    text: root.group(index === 0
+                                                     ? root.activeAnalysis.videoRows
+                                                     : root.activeAnalysis.audioRows)
                                     color: active ? Theme.accent : Theme.text3
                                     font.family: Theme.monoFont
                                     font.pixelSize: 10
@@ -1364,8 +1896,58 @@ ApplicationWindow {
                     }
                 }
 
+                // Source selector: only in dual mode. Selecting A/B switches
+                // which independent frame store the 视频/音频 tables display.
+                Rectangle {
+                    visible: root.compareMode
+                    width: 1; height: 18; color: Theme.line2
+                    Layout.leftMargin: 10; Layout.rightMargin: 8
+                }
+                Repeater {
+                    model: root.compareMode ? ["A", "B"] : []
+                    Rectangle {
+                        property bool active: root.activeSource === index
+                        width: srcContent.implicitWidth + 28
+                        height: 44
+                        color: active ? Theme.accentWash : "transparent"
+                        Rectangle {
+                            anchors.left: parent.left; anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            height: 2
+                            color: active ? Theme.accent : "transparent"
+                        }
+                        RowLayout {
+                            id: srcContent
+                            anchors.centerIn: parent
+                            spacing: 7
+                            Text {
+                                text: "源 " + modelData
+                                color: active ? Theme.accent : Theme.text3
+                                font.family: Theme.uiFont; font.pixelSize: 12; font.bold: active
+                            }
+                            Rectangle {
+                                implicitWidth: srcCount.implicitWidth + 12
+                                implicitHeight: 18; radius: 9
+                                color: active ? Theme.surface3 : Theme.sunken
+                                Text {
+                                    id: srcCount
+                                    anchors.centerIn: parent
+                                    text: root.group(root.rowsForSource(index, root.tabIndex === 0))
+                                    color: active ? Theme.accent : Theme.text3
+                                    font.family: Theme.monoFont; font.pixelSize: 10; font.bold: true
+                                }
+                            }
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: { root.activeSource = index; root.resetSelection() }
+                        }
+                    }
+                }
+
                 Loader {
-                    visible: root.isUrlMode
+                    visible: !root.compareMode && root.isUrlMode
                     Layout.leftMargin: 6
                     sourceComponent: badgeComponent
                     onLoaded: { item.text = "LIVE"; item.live = true }
@@ -1420,13 +2002,15 @@ ApplicationWindow {
                 id: videoGrid
                 ctl: root
                 isVideo: true
-                model: Analysis.videoModel
+                model: (root.compareMode && root.activeSource === 1)
+                       ? AnalysisB.videoModel : Analysis.videoModel
             }
             FrameGrid {
                 id: audioGrid
                 ctl: root
                 isVideo: false
-                model: Analysis.audioModel
+                model: (root.compareMode && root.activeSource === 1)
+                       ? AnalysisB.audioModel : Analysis.audioModel
             }
         }
 
@@ -1678,6 +2262,43 @@ ApplicationWindow {
                 }
             }
             Text {
+                text: "对齐锚点（多流对比时可选）"
+                color: Theme.text2
+                font.family: Theme.uiFont
+                font.pixelSize: 11
+                font.bold: true
+            }
+            Text {
+                text: "第二路输入在 SOURCE 面板的 B 行填写。两份清单都有 PDT 时给出精确墙上时钟偏移；没有 PDT 时可填共同事件的毫秒偏移，结果在 SUMMARY 的 COMPARISON 段显示。"
+                color: Theme.text3
+                font.family: Theme.uiFont
+                font.pixelSize: 11
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+            GridLayout {
+                columns: 2
+                columnSpacing: 12
+                rowSpacing: 8
+                Label { text: "人工锚点 ms（可选）"; color: Theme.text2; font.pixelSize: 12 }
+                TextField {
+                    id: anchorField
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 30
+                    placeholderText: "无 PDT 时填共同事件的毫秒偏移，留空=相对对齐"
+                    placeholderTextColor: Theme.text4
+                    color: Theme.text1
+                    font.family: Theme.monoFont
+                    font.pixelSize: 11
+                    selectByMouse: true
+                    validator: DoubleValidator { }
+                    background: Rectangle {
+                        radius: 6; color: Theme.sunken
+                        border.color: anchorField.activeFocus ? Theme.accent : Theme.line2
+                    }
+                }
+            }
+            Text {
                 text: "FFmpeg 高级选项  K=V，逗号 / 分号 / 换行分隔"
                 color: Theme.text2
                 font.family: Theme.uiFont
@@ -1741,6 +2362,8 @@ ApplicationWindow {
             filterInput.text = ""
             Analysis.setFilter(true, "")
             Analysis.setFilter(false, "")
+            AnalysisB.setFilter(true, "")
+            AnalysisB.setFilter(false, "")
             videoGrid.table.contentY = 0
             audioGrid.table.contentX = 0
             audioGrid.table.contentY = 0
@@ -1749,6 +2372,7 @@ ApplicationWindow {
             root.streamList = streams
             root.errorDiag = ({})
             root.noticeDismissed = false
+            if (offsetCanvas && offsetCanvas.requestPaint) offsetCanvas.requestPaint()
         }
         // A real failure is an inline notice + status state, never a modal
         // dialog. Stopping / cancelling never reaches this handler.
@@ -1762,6 +2386,39 @@ ApplicationWindow {
                 root.fetchText = "回捞中 · 0 个分片"
             } else if (phase === "download" && total > 0) {
                 root.fetchText = "回捞中 · " + done + " / " + total + " 个分片"
+            }
+        }
+    }
+
+    // B controller has no worker of its own: its signals are driven by the
+    // source:"B" JSON lines dispatched from the primary worker.
+    Connections {
+        target: AnalysisB
+        function onLiveUpdated(summary, streams) {
+            root.summaryB = summary
+            if (summary.streamCount !== undefined)
+                root.streamListB = streams
+        }
+        function onAnalysisSucceeded(summary, streams) {
+            root.filterText = ""
+            filterInput.text = ""
+            AnalysisB.setFilter(true, "")
+            AnalysisB.setFilter(false, "")
+            root.summaryB = summary
+            root.streamListB = streams
+            root.errorDiagB = ({})
+            root.noticeDismissed = false
+        }
+        function onAnalysisFailed(diag) {
+            root.errorDiagB = diag
+            root.noticeDismissed = false
+            root.showToast("B 源解析失败 · " + (diag.message || diag.code))
+        }
+        function onFetchProgress(done, total, phase) {
+            if (phase === "start") {
+                root.fetchText = "B 回捞中 · 0 个分片"
+            } else if (phase === "download" && total > 0) {
+                root.fetchText = "B 回捞中 · " + done + " / " + total + " 个分片"
             }
         }
     }

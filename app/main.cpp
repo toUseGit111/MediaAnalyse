@@ -84,7 +84,13 @@ int main(int argc, char** argv) {
 
     QQmlApplicationEngine engine;
     ma::bridge::AnalysisController controller;
+    ma::bridge::AnalysisController compareController;
+    // Dual-source mode uses one worker for both inputs; source:"B" lines are
+    // dispatched into compareController, which owns its own pair of frame
+    // models but never launches a worker of its own.
+    controller.setSecondaryController(&compareController);
     engine.rootContext()->setContextProperty("Analysis", &controller);
+    engine.rootContext()->setContextProperty("AnalysisB", &compareController);
     // Optional CLI argument: open and analyze this path immediately. A bare
     // relative path must be resolved here: once the GUI runs from a shortcut or
     // double-click its working directory is the exe directory, so "clip.mp4"

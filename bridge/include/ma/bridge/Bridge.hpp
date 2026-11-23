@@ -124,6 +124,16 @@ public:
     Q_INVOKABLE int typeColumn(bool video) const;
 
     Q_INVOKABLE void start(const QString& rawInput, const QVariantMap& options);
+    // In GUI dual-source mode the primary controller's worker also carries the
+    // second recording's JSON lines, tagged source:"B". The app wires the two
+    // controllers together with setSecondaryController(); dispatch then feeds
+    // those lines into this controller without spawning a second worker.
+    void setSecondaryController(AnalysisController* secondary) {
+        secondary_ = secondary;
+    }
+    void ingestExternalLine(const std::string& line) { handleWorkerLine(line); }
+    void beginExternalRun();
+    void markExternalStop();
     // No-op once the worker has delivered its result: a late "stop" click must
     // never be mistaken for the start of a fresh analysis or an error.
     Q_INVOKABLE void cancel();
@@ -163,7 +173,8 @@ signals:
     void liveUpdated(const QVariantMap& summary, const QVariantList& streams);
 
 private:
-    void finishWith(ma::Outcome<ma::AnalysisResult> outcome);
+    void finishWith(ma::Outcome<ma::AnalysisResult> outcome,
+                    const ma::TimelineComparison* comparison = nullptr);
     void handleLiveStreams(ma::AnalysisResult& r);
     void handleLiveFrames(ma::AnalysisResult& r);
     QVariantMap liveSummary(bool withStreamCount = false) const;
@@ -187,6 +198,7 @@ private:
     int progressLogTick_ = 0;        // throttle progress log lines
     QString workerPath_;             // path to analyzer-worker.exe
     QString lastDumpPath_;           // dump reported by the worker on stderr
+    AnalysisController* secondary_ = nullptr; // B table controller (no own worker)
 
     // ---- live incremental publishing (worker "streams"/"frames" lines) ----
     ma::AnalysisResult liveHeader_;             // container + stream list

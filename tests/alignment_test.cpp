@@ -239,6 +239,66 @@ int main() {
            cmpManual.method == "manual-anchor" &&
            cmpManual.confidence == 0.5 && cmpManual.comparable &&
            std::abs(cmpManual.offsetMs - 800.0) < 1e-6);
+
+    // Same encoded keyframes shifted in time: recover the offset without PDT.
+    ma::AnalysisResult sigA, sigB;
+    for (int i = 0; i < 8; ++i) {
+        ma::FrameRecord fa;
+        fa.streamIndex = 0; fa.ptsTime = i * 2.0; fa.keyframe = true;
+        fa.size = 1000 + i; fa.pictType = "I";
+        ma::FrameRecord fb = fa;
+        fb.ptsTime = fa.ptsTime.value() + 12.5;
+        sigA.frames.push_back(fa);
+        sigB.frames.push_back(fb);
+    }
+    const auto cmpSig =
+        compareTimelines(relative, absolute, std::nullopt, &sigA, &sigB);
+    expect("identical keyframes -> content offset",
+           cmpSig.method == "content-signature" && cmpSig.comparable &&
+           std::abs(cmpSig.offsetMs + 12500.0) < 1e-6 &&
+           cmpSig.confidence > 0.5);
+
+    // A mid-file desync must show up as an anomalous window, not just a flat
+    // global offset. B is 400 ms behind A only after t=40 s.
+    ma::AnalysisResult driftA, driftB;
+    for (int i = 0; i < 40; ++i) {
+        ma::FrameRecord fa;
+        fa.streamIndex = 0; fa.ptsTime = i * 2.0; fa.keyframe = true;
+        fa.size = 2000 + i; fa.pictType = "I";
+        ma::FrameRecord fb = fa;
+        fb.ptsTime = fa.ptsTime.value() - (i >= 20 ? 0.4 : 0.0);
+        driftA.frames.push_back(fa);
+        driftB.frames.push_back(fb);
+    }
+    const auto cmpDrift =
+        compareTimelines(relative, absolute, std::nullopt, &driftA, &driftB);
+    expect("mid-file shift -> anomaly window",
+           cmpDrift.windows.size() >= 2 && !cmpDrift.anomalies.empty() &&
+           cmpDrift.maxDeviationMs > 200.0 &&
+           cmpDrift.anomalies[0].startSeconds >= 25.0);
+
+    // Different encodes of one event: no identical frames, but the segment
+    // packet-count pattern still lines up and exposes the offset curve.
+    AlignmentReport segA, segB;
+    segA.coveredSeconds = segB.coveredSeconds = 120.0;
+    segA.streams.push_back(ma::StreamSyncMeta{});
+    segB.streams.push_back(ma::StreamSyncMeta{});
+    for (int i = 0; i < 30; ++i) {
+        ma::HlsSegment x;
+        x.packetCount = (i % 2) ? 182 : 183;
+        x.firstPtsSeconds = i * 4.0;
+        ma::HlsSegment y = x;
+        y.firstPtsSeconds = i * 4.0 + 2.0;
+        segA.playlist.segments.push_back(x);
+        segB.playlist.segments.push_back(y);
+    }
+    ma::AnalysisResult noFramesA, noFramesB;
+    const auto cmpSeg = compareTimelines(segA, segB, std::nullopt,
+                                         &noFramesA, &noFramesB);
+    expect("segment pattern -> relative timeline",
+           cmpSeg.method == "segment-pattern" && cmpSeg.windows.size() > 1 &&
+           std::abs(cmpSeg.offsetMs + 2000.0) < 1e-6);
+
     const auto cmpEmpty = compareTimelines(AlignmentReport{}, absolute);
     expect("empty timeline -> unavailable", cmpEmpty.method == "unavailable");
 
@@ -269,6 +329,16 @@ int main() {
     expect("comparison round-trip",
            backCmp.method == "pdt" &&
            std::abs(backCmp.offsetMs - 1500.0) < 1e-6);
+
+    TimelineComparison driftBack;
+    ma::AnalysisResult dummy;
+    const std::string driftJson = ma::core::toJson(
+        dummy, d, false, "result", "test", 0, &cmpDrift);
+    ma::core::fromJson(driftJson, dummy, backDiag, &driftBack);
+    expect("timeline windows round-trip",
+           driftBack.windows.size() == cmpDrift.windows.size() &&
+           driftBack.anomalies.size() == cmpDrift.anomalies.size() &&
+           std::abs(driftBack.maxDeviationMs - cmpDrift.maxDeviationMs) < 1e-6);
 
     AnalysisOptions opts;
     opts.enableAlignment = false;

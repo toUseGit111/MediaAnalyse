@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "ma/core/MediaInfo.hpp"
+#include "ma/core/Result.hpp"
 
 namespace ma {
 
@@ -145,23 +146,82 @@ struct AlignmentReport {
 // checks A/V start offset, pts monotonicity and gaps.
 AlignmentReport computeAlignment(const AnalysisResult& r, const HlsPlaylist& playlist);
 
+struct OffsetWindow {
+    double startSeconds = 0.0;   // relative to the recording's own timeline
+    double endSeconds = 0.0;
+    double offsetMs = 0.0;       // median A-relative-to-B offset in this window
+    int sampleCount = 0;
+};
+
+struct SyncAnomaly {
+    double startSeconds = 0.0;
+    double endSeconds = 0.0;
+    double offsetMs = 0.0;       // median offset inside the period
+    double deviationMs = 0.0;    // vs the whole-run offset
+    std::string kind;            // "local-shift" | "step" | "drift"
+};
+
 struct TimelineComparison {
     bool comparable = false;
-    std::string method;      // "pdt" | "manual-anchor" | "relative" | "unavailable"
+    // "pdt" | "content-signature" | "segment-pattern" | "manual-anchor" |
+    // "relative" | "unavailable"
+    std::string method;
     double offsetMs = 0.0;   // positive = A starts later than B
     double confidence = 0.0; // 1.0 = wall clock, 0.5 = manual anchor, 0 = guess
     double overlapSeconds = 0.0;
     std::string note;
     std::optional<int64_t> firstWallClockA;
     std::optional<int64_t> firstWallClockB;
+
+    // Time-varying diagnostics (content-signature method only). When a
+    // recording drifts or jumps out of sync in the middle, the single
+    // `offsetMs` above is not enough: `windows` is the offset curve,
+    // `anomalies` lists the concrete periods that deviate from it.
+    double windowSeconds = 0.0;
+    double driftMsPerMin = 0.0;
+    double maxDeviationMs = 0.0;
+    std::vector<OffsetWindow> windows;
+    std::vector<SyncAnomaly> anomalies;
 };
 
+// Best-effort offset recovery without a wall-clock tag. When two recordings
+// carry the same encoded elementary stream, their keyframes have identical
+// packet sizes and picture types. Matching those signatures yields a constant
+// PTS offset even when neither playlist has #EXT-X-PROGRAM-DATE-TIME. This is
+// deliberately reported as medium confidence: it proves the frames match, not
+// that the two recorders shared a clock.
+struct ContentOffset {
+    bool found = false;
+    double offsetMs = 0.0;       // A relative to B, whole-run median
+    double confidence = 0.0;     // 0..0.85, scales with the number of matches
+    int matchedPairs = 0;        // votes in the winning cluster
+    int signatureCount = 0;      // smaller side's keyframe signatures
+    std::string note;
+    double windowSeconds = 10.0;
+    double driftMsPerMin = 0.0;
+    double maxDeviationMs = 0.0;
+    std::vector<OffsetWindow> windows;
+    std::vector<SyncAnomaly> anomalies;
+};
+ContentOffset estimateContentOffset(const AnalysisResult& a,
+                                    const AnalysisResult& b);
+
+// Fallback for two recordings of the same live event encoded differently:
+// their TS segments still share packet-count / EXTINF patterns. Matching the
+// segment sequence gives a relative offset curve (the absolute shift can be
+// ambiguous when the GOP pattern repeats, so confidence stays low).
+ContentOffset estimateSegmentPatternOffset(const AlignmentReport& a,
+                                           const AlignmentReport& b);
+
 // Compare two recordings. With PDT on both sides this is an exact wall-clock
-// offset. Without it, `manualAnchorMs` lets an operator supply a known sync
-// point (e.g. a clap / timecode) and the result is explicitly marked as a
-// low-confidence manual alignment instead of pretending to be absolute.
+// offset. Without PDT, matching frame signatures are tried first; an operator
+// may still override everything with `manualAnchorMs` (a known sync point such
+// as a clap / timecode). Passing the full results enables the signature path;
+// the CLI and the GUI worker both keep their frame lists, so they do.
 TimelineComparison compareTimelines(const AlignmentReport& a,
                                     const AlignmentReport& b,
-                                    std::optional<double> manualAnchorMs = std::nullopt);
+                                    std::optional<double> manualAnchorMs = std::nullopt,
+                                    const AnalysisResult* aResult = nullptr,
+                                    const AnalysisResult* bResult = nullptr);
 
 } // namespace ma

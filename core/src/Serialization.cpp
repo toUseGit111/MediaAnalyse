@@ -332,7 +332,30 @@ void appendComparison(std::string& o, const ma::TimelineComparison& c) {
     o += "\"overlapSeconds\":" + jnum(c.overlapSeconds) + ",";
     o += "\"note\":" + jstr(c.note) + ",";
     o += "\"firstWallClockA\":" + joptI64(c.firstWallClockA) + ",";
-    o += "\"firstWallClockB\":" + joptI64(c.firstWallClockB) + "}";
+    o += "\"firstWallClockB\":" + joptI64(c.firstWallClockB) + ",";
+    o += "\"windowSeconds\":" + jnum(c.windowSeconds) + ",";
+    o += "\"driftMsPerMin\":" + jnum(c.driftMsPerMin) + ",";
+    o += "\"maxDeviationMs\":" + jnum(c.maxDeviationMs) + ",";
+    o += "\"windows\":[";
+    for (size_t i = 0; i < c.windows.size(); ++i) {
+        if (i) o += ",";
+        const auto& w = c.windows[i];
+        o += "{\"start\":" + jnum(w.startSeconds) +
+             ",\"end\":" + jnum(w.endSeconds) +
+             ",\"offsetMs\":" + jnum(w.offsetMs) +
+             ",\"samples\":" + std::to_string(w.sampleCount) + "}";
+    }
+    o += "],\"anomalies\":[";
+    for (size_t i = 0; i < c.anomalies.size(); ++i) {
+        if (i) o += ",";
+        const auto& a = c.anomalies[i];
+        o += "{\"start\":" + jnum(a.startSeconds) +
+             ",\"end\":" + jnum(a.endSeconds) +
+             ",\"offsetMs\":" + jnum(a.offsetMs) +
+             ",\"deviationMs\":" + jnum(a.deviationMs) +
+             ",\"kind\":" + jstr(a.kind) + "}";
+    }
+    o += "]}";
 }
 
 // ---- string <-> enum helpers ----------------------------------------------
@@ -467,6 +490,30 @@ ma::TimelineComparison parseComparison(const JVal& v) {
     c.note = js(v.find("note"));
     c.firstWallClockA = joi(v.find("firstWallClockA"));
     c.firstWallClockB = joi(v.find("firstWallClockB"));
+    c.windowSeconds = jd(v.find("windowSeconds"), 10.0);
+    c.driftMsPerMin = jd(v.find("driftMsPerMin"));
+    c.maxDeviationMs = jd(v.find("maxDeviationMs"));
+    if (const JVal* arr = v.find("windows"); arr && arr->isArray()) {
+        for (const auto& wv : arr->arr) {
+            ma::OffsetWindow w;
+            w.startSeconds = jd(wv.find("start"));
+            w.endSeconds = jd(wv.find("end"));
+            w.offsetMs = jd(wv.find("offsetMs"));
+            w.sampleCount = static_cast<int>(ji(wv.find("samples")));
+            c.windows.push_back(w);
+        }
+    }
+    if (const JVal* arr = v.find("anomalies"); arr && arr->isArray()) {
+        for (const auto& av : arr->arr) {
+            ma::SyncAnomaly a;
+            a.startSeconds = jd(av.find("start"));
+            a.endSeconds = jd(av.find("end"));
+            a.offsetMs = jd(av.find("offsetMs"));
+            a.deviationMs = jd(av.find("deviationMs"));
+            a.kind = js(av.find("kind"));
+            c.anomalies.push_back(a);
+        }
+    }
     return c;
 }
 
@@ -709,6 +756,12 @@ std::string toOptionsJson(const AnalysisOptions& o) {
     s += "\"fetchDir\":" + jstr(o.fetchDir) + ",";
     s += "\"fetchJobs\":" + std::to_string(o.fetchJobs) + ",";
     s += "\"fetchTimeout\":" + jnum(o.fetchTimeout) + ",";
+    s += "\"compareInput\":" + jstr(o.compareInput) + ",";
+    s += "\"compareSource\":" + jstr(o.compareSource) + ",";
+    s += std::string("\"hasAnchorMs\":") + (o.hasAnchorMs ? "true" : "false") + ",";
+    s += "\"anchorMs\":" + jnum(o.anchorMs) + ",";
+    s += std::string("\"compareFullOutput\":") +
+         (o.compareFullOutput ? "true" : "false") + ",";
     s += "\"extraOptions\":[";
     for (size_t i = 0; i < o.extraOptions.size(); ++i) {
         s += "{\"k\":" + jstr(o.extraOptions[i].first) +
@@ -736,6 +789,11 @@ bool fromOptionsJson(const JVal& root, AnalysisOptions& o) {
     if (const JVal* x = root.find("fetchDir")) o.fetchDir = x->asString();
     if (const JVal* x = root.find("fetchJobs")) o.fetchJobs = static_cast<int>(x->asInt());
     if (const JVal* x = root.find("fetchTimeout")) o.fetchTimeout = x->asDouble();
+    if (const JVal* x = root.find("compareInput")) o.compareInput = x->asString();
+    if (const JVal* x = root.find("compareSource")) o.compareSource = x->asString();
+    if (const JVal* x = root.find("hasAnchorMs")) o.hasAnchorMs = x->asBool();
+    if (const JVal* x = root.find("anchorMs"); x && x->isNumber()) o.anchorMs = x->asDouble();
+    if (const JVal* x = root.find("compareFullOutput")) o.compareFullOutput = x->asBool();
     if (const JVal* eo = root.find("extraOptions"); eo && eo->isArray()) {
         for (const auto& e : eo->arr) {
             if (!e.isObject()) continue;

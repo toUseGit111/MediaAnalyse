@@ -9,7 +9,10 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace ma {
 namespace {
@@ -556,9 +559,375 @@ AlignmentReport computeAlignment(const AnalysisResult& r, const HlsPlaylist& pla
 
 // -------------------------------------------------------------- comparison --
 
+namespace {
+
+// Keyframe signatures are only useful if they come from the same elementary
+// stream in both recordings. Prefer the busiest video stream; fall back to any
+// stream with packet timing when a recording has no video.
+int dominantStream(const AnalysisResult& r) {
+    std::unordered_map<int, int> counts;
+    for (const auto& f : r.frames)
+        if (f.ptsTime) ++counts[f.streamIndex];
+    int best = -1, bestCount = 0;
+    for (const auto& [idx, n] : counts) {
+        if (n > bestCount) {
+            best = idx;
+            bestCount = n;
+        }
+    }
+    return best;
+}
+
+struct FrameSignature {
+    double ptsSeconds = 0.0;
+    int64_t size = 0;
+    std::string pictType;
+    // Sizes / types of the following packets make an I-frame signature far
+    // more unique than the I-frame size alone (which repeats easily).
+    std::string context;
+};
+
+std::string signatureKey(const FrameSignature& s) {
+    return std::to_string(s.size) + "|" + s.pictType + "|" + s.context;
+}
+
+double medianValue(std::vector<double> values) {
+    if (values.empty()) return 0.0;
+    std::sort(values.begin(), values.end());
+    const size_t n = values.size();
+    return (n % 2) ? values[n / 2]
+                   : (values[n / 2 - 1] + values[n / 2]) / 2.0;
+}
+
+std::vector<FrameSignature> collectSignatures(const AnalysisResult& r) {
+    std::vector<FrameSignature> out;
+    const int stream = dominantStream(r);
+    if (stream < 0) return out;
+    for (size_t i = 0; i < r.frames.size(); ++i) {
+        const auto& f = r.frames[i];
+        if (f.streamIndex != stream || !f.ptsTime || !f.keyframe || f.size <= 0)
+            continue;
+        std::string context;
+        for (size_t j = i + 1, taken = 0;
+             j < r.frames.size() && taken < 3; ++j) {
+            const auto& next = r.frames[j];
+            if (next.streamIndex != stream) continue;
+            context += std::to_string(next.size) + ":" +
+                       next.pictType.value_or("") + ";";
+            ++taken;
+        }
+        out.push_back({*f.ptsTime, f.size, f.pictType.value_or(""), context});
+    }
+    // Bound work for very long recordings while keeping uniform coverage.
+    constexpr size_t kMaxSignatures = 20000;
+    if (out.size() > kMaxSignatures) {
+        std::vector<FrameSignature> sampled;
+        sampled.reserve(kMaxSignatures);
+        const double stride = static_cast<double>(out.size()) / kMaxSignatures;
+        for (size_t i = 0; i < kMaxSignatures; ++i)
+            sampled.push_back(out[static_cast<size_t>(i * stride)]);
+        out.swap(sampled);
+    }
+    return out;
+}
+
+}  // namespace
+
+// Shared windowing / anomaly detection for both keyframe and segment-pattern
+// tracks. `samples` is a list of {timeSeconds, offsetMs}.
+static ContentOffset buildTimelineFromSamples(
+    const std::vector<std::pair<double, double>>& samples,
+    int matchedPairs, int signatureCount,
+    const std::string& notePrefix, double confidence) {
+    ContentOffset result;
+    if (samples.size() < 4) return result;
+
+    std::vector<double> allOffsets;
+    allOffsets.reserve(samples.size());
+    for (const auto& p : samples) allOffsets.push_back(p.second);
+    const double medianOffset = medianValue(allOffsets);
+
+    const double tMin = samples.front().first;
+    const double span = samples.back().first - tMin;
+    double window = 10.0;
+    if (span < 60.0) window = 5.0;
+    if (span < 20.0) window = 1.0;
+    result.windowSeconds = window;
+    const int windowCount = std::max(1, static_cast<int>(std::ceil(span / window)));
+    std::vector<std::vector<double>> buckets(static_cast<size_t>(windowCount));
+    for (const auto& p : samples) {
+        int idx = static_cast<int>(std::floor((p.first - tMin) / window));
+        idx = std::clamp(idx, 0, windowCount - 1);
+        buckets[static_cast<size_t>(idx)].push_back(p.second);
+    }
+    for (int i = 0; i < windowCount; ++i) {
+        if (buckets[static_cast<size_t>(i)].empty()) continue;
+        OffsetWindow w;
+        w.startSeconds = tMin + i * window;
+        w.endSeconds = std::min(tMin + (i + 1) * window, samples.back().first);
+        w.offsetMs = medianValue(buckets[static_cast<size_t>(i)]);
+        w.sampleCount = static_cast<int>(buckets[static_cast<size_t>(i)].size());
+        result.windows.push_back(w);
+    }
+
+    // Baseline is the dominant window offset, not the median: with a step the
+    // median lands halfway between two real states and makes every window
+    // look equally wrong. The majority state is the useful reference.
+    double runOffset = medianOffset;
+    int bestModeCount = -1;
+    for (const auto& candidate : result.windows) {
+        std::vector<double> near;
+        for (const auto& w : result.windows)
+            if (std::fabs(w.offsetMs - candidate.offsetMs) <= 25.0)
+                near.push_back(w.offsetMs);
+        if (static_cast<int>(near.size()) > bestModeCount) {
+            bestModeCount = static_cast<int>(near.size());
+            runOffset = medianValue(near);
+        }
+    }
+    for (const auto& w : result.windows)
+        result.maxDeviationMs =
+            std::max(result.maxDeviationMs, std::fabs(w.offsetMs - runOffset));
+
+    double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    for (const auto& p : samples) {
+        sx += p.first;
+        sy += p.second;
+        sxx += p.first * p.first;
+        sxy += p.first * p.second;
+    }
+    const double n = static_cast<double>(samples.size());
+    const double denom = n * sxx - sx * sx;
+    if (std::fabs(denom) > 1e-9)
+        result.driftMsPerMin = (n * sxy - sx * sy) / denom * 60.0;
+
+    std::vector<double> deviations;
+    for (const auto& w : result.windows)
+        deviations.push_back(std::fabs(w.offsetMs - runOffset));
+    const double mad = medianValue(deviations);
+    const double threshold = std::max(30.0, std::min(150.0, 2.0 * mad));
+    bool inGroup = false;
+    double groupStart = 0.0, groupEnd = 0.0;
+    std::vector<double> groupOffsets;
+    auto closeGroup = [&]() {
+        if (!inGroup || groupOffsets.empty()) return;
+        SyncAnomaly a;
+        a.startSeconds = groupStart;
+        a.endSeconds = groupEnd;
+        a.offsetMs = medianValue(groupOffsets);
+        a.deviationMs = a.offsetMs - runOffset;
+        a.kind = std::fabs(a.deviationMs) > 2.0 * threshold ? "step"
+                                                            : "local-shift";
+        result.anomalies.push_back(a);
+        groupOffsets.clear();
+        inGroup = false;
+    };
+    for (const auto& w : result.windows) {
+        const bool bad = std::fabs(w.offsetMs - runOffset) > threshold;
+        if (bad) {
+            if (!inGroup) {
+                inGroup = true;
+                groupStart = w.startSeconds;
+            }
+            groupEnd = w.endSeconds;
+            groupOffsets.push_back(w.offsetMs);
+        } else {
+            closeGroup();
+        }
+    }
+    closeGroup();
+    std::sort(result.anomalies.begin(), result.anomalies.end(),
+              [](const SyncAnomaly& x, const SyncAnomaly& y) {
+                  return std::fabs(x.deviationMs) > std::fabs(y.deviationMs);
+              });
+    if (result.anomalies.size() > 8) result.anomalies.resize(8);
+
+    result.found = true;
+    result.matchedPairs = matchedPairs;
+    result.signatureCount = signatureCount;
+    result.offsetMs = runOffset;
+    result.confidence = confidence;
+    result.note = notePrefix + std::to_string(matchedPairs) +
+                  " 组，整体 A 相对 B " + msText(runOffset) +
+                  " ms；检测到 " + std::to_string(result.anomalies.size()) +
+                  " 段不同步，最大偏差 " + msText(result.maxDeviationMs) +
+                  " ms，漂移 " + msText(result.driftMsPerMin) + " ms/min";
+    return result;
+}
+
+ContentOffset estimateContentOffset(const AnalysisResult& a,
+                                    const AnalysisResult& b) {
+    ContentOffset result;
+    const auto sa = collectSignatures(a);
+    const auto sb = collectSignatures(b);
+    result.signatureCount = static_cast<int>(std::min(sa.size(), sb.size()));
+    if (sa.empty() || sb.empty()) return result;
+
+    std::unordered_map<std::string, std::vector<double>> bySignature;
+    bySignature.reserve(sb.size() * 2);
+    for (const auto& s : sb) bySignature[signatureKey(s)].push_back(s.ptsSeconds);
+
+    // One vote per identical keyframe pair, bucketed to whole milliseconds.
+    // A constant PTS shift then stands out even when frame rates jitter.
+    std::map<int, int> votes;
+    for (const auto& s : sa) {
+        const auto it = bySignature.find(signatureKey(s));
+        if (it == bySignature.end()) continue;
+        for (double ptsB : it->second) {
+            const double off = (s.ptsSeconds - ptsB) * 1000.0;
+            if (std::fabs(off) > 86400000.0) continue;  // > 24 h is not a shift
+            ++votes[static_cast<int>(std::llround(off))];
+        }
+    }
+    if (votes.empty()) return result;
+
+    // Merge neighbouring millisecond buckets (±5 ms) to survive PTS rounding
+    // differences between containers.
+    int bestCount = 0, bestCenter = votes.begin()->first;
+    for (const auto& [center, unused] : votes) {
+        (void)unused;
+        int cluster = 0;
+        for (const auto& [offset, n] : votes)
+            if (std::abs(offset - center) <= 5) cluster += n;
+        if (cluster > bestCount) {
+            bestCount = cluster;
+            bestCenter = center;
+        }
+    }
+    if (bestCount < 4) return result;
+
+    std::vector<double> refined;
+    for (const auto& [offset, n] : votes) {
+        if (std::abs(offset - bestCenter) > 5) continue;
+        refined.insert(refined.end(), static_cast<size_t>(n),
+                       static_cast<double>(offset));
+    }
+    std::sort(refined.begin(), refined.end());
+
+    const double voteOffset = refined[refined.size() / 2];
+    const double ratio = result.signatureCount > 0
+                             ? static_cast<double>(bestCount) /
+                                   static_cast<double>(result.signatureCount)
+                             : 0.0;
+
+    // Track the same keyframes through both recordings in time order. A single
+    // median offset hides a mid-file desync: the tracked pairs give us an
+    // offset curve and let us name the exact period that went out of sync.
+    std::vector<FrameSignature> ordered = sa;
+    std::sort(ordered.begin(), ordered.end(),
+              [](const FrameSignature& x, const FrameSignature& y) {
+                  return x.ptsSeconds < y.ptsSeconds;
+              });
+    std::vector<std::pair<double, double>> samples;  // {tA(seconds), offsetMs}
+    bool haveLast = false;
+    double lastOffset = voteOffset;
+    double lastPtsB = -1e100;
+    for (const auto& s : ordered) {
+        const auto it = bySignature.find(signatureKey(s));
+        if (it == bySignature.end()) continue;
+        const double* bestPts = nullptr;
+        double bestOffset = 0.0, bestScore = 1e100;
+        for (double ptsB : it->second) {
+            if (ptsB <= lastPtsB) continue;  // never walk backwards in B
+            const double off = (s.ptsSeconds - ptsB) * 1000.0;
+            const double score = haveLast ? std::fabs(off - lastOffset)
+                                          : std::fabs(off - voteOffset);
+            if (score > 5000.0) continue;    // implausible jump -> stray match
+            if (score < bestScore) {
+                bestScore = score;
+                bestPts = &ptsB;
+                bestOffset = off;
+            }
+        }
+        if (!bestPts) continue;
+        samples.push_back({s.ptsSeconds, bestOffset});
+        lastOffset = bestOffset;
+        lastPtsB = *bestPts;
+        haveLast = true;
+    }
+    const double conf = std::clamp(0.35 + 0.5 * std::min(1.0, ratio * 3.0),
+                                   0.0, 0.85);
+    return buildTimelineFromSamples(samples, bestCount, result.signatureCount,
+                                    "无 PDT，两路关键帧签名匹配 ", conf);
+}
+
+ContentOffset estimateSegmentPatternOffset(const AlignmentReport& a,
+                                           const AlignmentReport& b) {
+    ContentOffset result;
+    const auto& sa = a.playlist.segments;
+    const auto& sb = b.playlist.segments;
+    if (sa.empty() || sb.empty()) return result;
+
+    std::map<int, int> votes;
+    for (size_t i = 0; i < sa.size(); ++i) {
+        if (sa[i].packetCount <= 0 || !sa[i].firstPtsSeconds) continue;
+        for (size_t j = 0; j < sb.size(); ++j) {
+            if (sb[j].packetCount <= 0 || !sb[j].firstPtsSeconds) continue;
+            if (sa[i].packetCount == sb[j].packetCount)
+                ++votes[static_cast<int>(i) - static_cast<int>(j)];
+        }
+    }
+    if (votes.empty()) return result;
+
+    int maxVotes = 0;
+    for (const auto& [shift, n] : votes) maxVotes = std::max(maxVotes, n);
+
+    // A repeating GOP pattern makes several shifts equally plausible. Prefer
+    // the one whose implied PTS offset is smallest: the offset curve's shape
+    // (drift / local jumps) is the useful evidence here, not its constant.
+    int chosenShift = votes.begin()->first;
+    double chosenOffset = 1e100;
+    for (const auto& [shift, n] : votes) {
+        if (n < maxVotes * 9 / 10) continue;
+        std::vector<double> offsets;
+        for (size_t i = 0; i < sa.size(); ++i) {
+            const long long j = static_cast<long long>(i) - shift;
+            if (j < 0 || j >= static_cast<long long>(sb.size())) continue;
+            if (sa[i].packetCount <= 0 || sb[static_cast<size_t>(j)].packetCount <= 0)
+                continue;
+            if (sa[i].packetCount != sb[static_cast<size_t>(j)].packetCount) continue;
+            if (!sa[i].firstPtsSeconds || !sb[static_cast<size_t>(j)].firstPtsSeconds)
+                continue;
+            offsets.push_back((*sa[i].firstPtsSeconds -
+                               *sb[static_cast<size_t>(j)].firstPtsSeconds) * 1000.0);
+        }
+        if (offsets.size() < 4) continue;
+        const double med = std::fabs(medianValue(offsets));
+        if (med < chosenOffset) {
+            chosenOffset = med;
+            chosenShift = shift;
+        }
+    }
+
+    std::vector<std::pair<double, double>> samples;
+    for (size_t i = 0; i < sa.size(); ++i) {
+        const long long j = static_cast<long long>(i) - chosenShift;
+        if (j < 0 || j >= static_cast<long long>(sb.size())) continue;
+        if (sa[i].packetCount <= 0 || sb[static_cast<size_t>(j)].packetCount <= 0)
+            continue;
+        if (sa[i].packetCount != sb[static_cast<size_t>(j)].packetCount) continue;
+        if (!sa[i].firstPtsSeconds || !sb[static_cast<size_t>(j)].firstPtsSeconds)
+            continue;
+        samples.push_back({*sa[i].firstPtsSeconds,
+                           (*sa[i].firstPtsSeconds -
+                            *sb[static_cast<size_t>(j)].firstPtsSeconds) * 1000.0});
+    }
+    if (samples.size() < 4) return result;
+
+    ContentOffset out = buildTimelineFromSamples(
+        samples, static_cast<int>(samples.size()),
+        static_cast<int>(std::min(sa.size(), sb.size())),
+        "无 PDT，分片包数模式匹配 ", 0.4);
+    if (out.found)
+        out.note += "（结构对齐存在周期歧义，绝对偏移仅供参考，重点看漂移与异常时段）";
+    return out;
+}
+
 TimelineComparison compareTimelines(const AlignmentReport& a,
                                     const AlignmentReport& b,
-                                    std::optional<double> manualAnchorMs) {
+                                    std::optional<double> manualAnchorMs,
+                                    const AnalysisResult* aResult,
+                                    const AnalysisResult* bResult) {
     TimelineComparison c;
     c.firstWallClockA = a.firstWallClockMs;
     c.firstWallClockB = b.firstWallClockMs;
@@ -574,6 +943,27 @@ TimelineComparison compareTimelines(const AlignmentReport& a,
 
     const double overlap = std::min(a.coveredSeconds, b.coveredSeconds);
     c.overlapSeconds = overlap;
+
+    // Even when PDT or a manual anchor supplies the global offset, the
+    // content-signature track is still the only evidence of a *local* desync.
+    // Compute it once and attach the curve to whichever method wins.
+    ContentOffset sig;
+    bool segmentFallback = false;
+    if (aResult && bResult) {
+        sig = estimateContentOffset(*aResult, *bResult);
+        if (!sig.found) {
+            sig = estimateSegmentPatternOffset(a, b);
+            segmentFallback = sig.found;
+        }
+    }
+    auto attachTimeline = [&](TimelineComparison& out) {
+        if (!sig.found) return;
+        out.windowSeconds = sig.windowSeconds;
+        out.driftMsPerMin = sig.driftMsPerMin;
+        out.maxDeviationMs = sig.maxDeviationMs;
+        out.windows = sig.windows;
+        out.anomalies = sig.anomalies;
+    };
 
     if (a.crossFileComparable && b.crossFileComparable &&
         a.firstWallClockMs && b.firstWallClockMs) {
@@ -591,6 +981,7 @@ TimelineComparison compareTimelines(const AlignmentReport& a,
         }
         c.note = "A=" + ta + "，B=" + tb + "，A 相对 B " +
                  msText(c.offsetMs) + " ms（PDT 绝对墙上时钟）";
+        attachTimeline(c);
         return c;
     }
 
@@ -601,15 +992,26 @@ TimelineComparison compareTimelines(const AlignmentReport& a,
         c.offsetMs = *manualAnchorMs;
         c.note = "缺少 PDT，按人工锚点 " + msText(*manualAnchorMs) +
                  " ms 对齐；该偏移依赖人工判断，置信度中等";
+        attachTimeline(c);
+        return c;
+    }
+
+    if (sig.found) {
+        c.comparable = true;
+        c.method = segmentFallback ? "segment-pattern" : "content-signature";
+        c.confidence = sig.confidence;
+        c.offsetMs = sig.offsetMs;
+        c.note = sig.note;
+        attachTimeline(c);
         return c;
     }
 
     c.method = "relative";
     c.confidence = 0.0;
     c.offsetMs = 0.0;
-    c.note = "至少一份录制文件缺少可用的 #EXT-X-PROGRAM-DATE-TIME，"
-             "只能按各自起点做相对对齐：画面差异不能直接解释为时间偏差。"
-             "请给录制端补 PDT，或用 --anchor-ms 指定一个共同事件作为锚点";
+    c.note = "两路都没有可用的 PDT，且未找到足够的相同关键帧签名，"
+             "只能按各自起点做相对比较：画面差异不能直接解释为时间偏差。"
+             "可在 B 路输入旁填人工锚点 ms，或让录制端补上 PDT";
     return c;
 }
 
