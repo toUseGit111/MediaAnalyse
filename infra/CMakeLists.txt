@@ -9,10 +9,12 @@ find_library(MA_FFMPEG_LIB_AVCODEC NAMES avcodec
              HINTS ${MA_FFMPEG_ROOT}/lib ${MA_FFMPEG_ROOT}/bin)
 find_library(MA_FFMPEG_LIB_AVUTIL NAMES avutil
              HINTS ${MA_FFMPEG_ROOT}/lib ${MA_FFMPEG_ROOT}/bin)
+find_library(MA_FFMPEG_LIB_SWRESAMPLE NAMES swresample
+             HINTS ${MA_FFMPEG_ROOT}/lib ${MA_FFMPEG_ROOT}/bin)
 
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(MAFFmpeg REQUIRED_VARS
-    MA_FFMPEG_INCLUDE_DIR MA_FFMPEG_LIB_AVFORMAT MA_FFMPEG_LIB_AVCODEC MA_FFMPEG_LIB_AVUTIL)
+    MA_FFMPEG_INCLUDE_DIR MA_FFMPEG_LIB_AVFORMAT MA_FFMPEG_LIB_AVCODEC MA_FFMPEG_LIB_AVUTIL MA_FFMPEG_LIB_SWRESAMPLE)
 
 add_library(ma_infra STATIC
     src/Interrupt.cpp
@@ -21,6 +23,7 @@ add_library(ma_infra STATIC
     src/Logger.cpp
     src/HlsTimeline.cpp
     src/CstoreFetcher.cpp
+    src/AudioDecoder.cpp
 )
 add_library(ma::infra ALIAS ma_infra)
 
@@ -33,6 +36,7 @@ target_link_libraries(ma_infra PUBLIC
     ${MA_FFMPEG_LIB_AVFORMAT}
     ${MA_FFMPEG_LIB_AVCODEC}
     ${MA_FFMPEG_LIB_AVUTIL}
+    ${MA_FFMPEG_LIB_SWRESAMPLE}
 )
 target_compile_features(ma_infra PUBLIC cxx_std_20)
 

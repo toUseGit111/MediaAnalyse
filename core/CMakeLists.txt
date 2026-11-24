@@ -3,6 +3,7 @@ add_library(ma_core STATIC
     src/UrlNormalizer.cpp
     src/Serialization.cpp
     src/Alignment.cpp
+    src/AudioCorrelation.cpp
 )
 add_library(ma::core ALIAS ma_core)
 

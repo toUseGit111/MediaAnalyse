@@ -18,14 +18,17 @@
 //
 // The worker has no console: everything worth debugging (request, FFmpeg's
 // av_log, stage failures, final outcome) goes to logs/analyzer-worker.log.
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 
 #include "ma/core/Alignment.hpp"
+#include "ma/core/AudioCorrelation.hpp"
 #include "ma/core/Analyzer.hpp"
 #include "ma/core/Result.hpp"
 #include "ma/core/Serialization.hpp"
@@ -35,6 +38,7 @@
 #include "ma/infra/Logger.hpp"
 #include "ma/infra/ProbeAnalyzer.hpp"
 #include "ma/infra/CstoreFetcher.hpp"
+#include "ma/infra/AudioDecoder.hpp"
 
 namespace {
 
@@ -327,8 +331,58 @@ int main() {
                 second.value.alignment ? *second.value.alignment : emptyB;
             std::optional<double> anchor;
             if (opts.hasAnchorMs) anchor = opts.anchorMs;
+
+            // Cross-view audio alignment: decode both tracks to 4 kHz mono
+            // (small enough for a whole 40-min recording) and first get the
+            // coarse global GCC-PHAT offset, then run a sliding-window track
+            // to recover "who is ahead in which period" even when the two
+            // recordings share one sound field but do not fully overlap.
+            std::optional<ma::AudioCorrelationResult> audio;
+            if (opts.audioAlign && outcome.ok() && second.ok()) {
+                const int kRate = 4000;
+                const double budget = std::clamp(opts.audioMaxSeconds, 1.0, 7200.0);
+                auto aPcm = ma::infra::decodeAudioMono(
+                    input, &cancel, opts, budget, kRate);
+                auto bPcm = ma::infra::decodeAudioMono(
+                    secondInput, &cancel, opts, budget, kRate);
+                if (aPcm.ok() && bPcm.ok()) {
+                    audio = ma::estimateAudioOffset(
+                        *aPcm, *bPcm, kRate,
+                        std::clamp(opts.audioMaxLagSeconds, 1.0, 300.0));
+                    if (audio->ok) {
+                        ma::AudioTrackOptions trackOpt;
+                        trackOpt.windowSeconds = opts.audioWindowSeconds;
+                        trackOpt.hopSeconds = opts.audioWindowSeconds;
+                        trackOpt.localSearchSeconds =
+                            std::clamp(opts.audioLocalSearchSeconds, 0.25, 30.0);
+                        ma::AudioOffsetTrack track = ma::estimateAudioOffsetTrack(
+                            *aPcm, *bPcm, kRate, audio->offsetMs, trackOpt);
+                        if (track.ok) {
+                            audio->hasTrack = true;
+                            audio->offsetMs = track.baseOffsetMs;  // modal, robust
+                            audio->track = std::move(track);
+                        }
+                    }
+                    MA_LOGI("worker", "audio-xcorr ok=" << audio->ok
+                                   << " offsetMs=" << audio->offsetMs
+                                   << " track=" << audio->hasTrack
+                                   << " windows="
+                                   << (audio->hasTrack
+                                           ? static_cast<int>(audio->track.windows.size())
+                                           : 0)
+                                   << " peak=" << audio->peakRatio
+                                   << " conf=" << audio->confidence);
+                } else {
+                    MA_LOGW("worker", "audio-xcorr decode failed: "
+                                   << ma::infra::redact(
+                                          aPcm.ok() ? bPcm.diag.message
+                                                    : aPcm.diag.message));
+                }
+            }
+
             comparison = ma::compareTimelines(A, B, anchor,
-                                              &outcome.value, &second.value);
+                                              &outcome.value, &second.value,
+                                              audio ? &*audio : nullptr);
             cmpPtr = &comparison;
             MA_LOGI("worker", "compare method=" << comparison.method
                                << " offsetMs=" << comparison.offsetMs

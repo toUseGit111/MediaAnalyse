@@ -35,6 +35,7 @@ ApplicationWindow {
     // independent frame stores/tables.
     property bool compareMode: false
     property bool compareCstoreMode: false
+    property bool audioAlignOn: false
     property int activeSource: 0          // 0 = A (primary), 1 = B (compare)
     property string fetchText: ""
     property int tabIndex: 0
@@ -58,6 +59,12 @@ ApplicationWindow {
     // Cross-file comparison, present only when a second file was analyzed.
     property var comparison: (root.summary && root.summary.comparison)
                              ? root.summary.comparison : ({})
+    // Unified offset curve: prefer the time-varying audio track when present,
+    // otherwise fall back to the content-signature window curve.
+    property var comparisonWindows: (root.comparison.hasAudioTrack &&
+                                     (root.comparison.audioWindows || []).length > 1)
+                                    ? root.comparison.audioWindows
+                                    : (root.comparison.windows || [])
     property var alignmentB: (root.summaryB && root.summaryB.alignment)
                              ? root.summaryB.alignment : ({})
     property var errorDiag: ({})
@@ -232,6 +239,16 @@ ApplicationWindow {
     }
 
     // ---------------- helpers ----------------
+    function compareMethodLabel(m) {
+        if (m === "audio-xcorr") return "audio-xcorr / 音频互相关"
+        if (m === "pdt") return "pdt / PDT 墙上时钟"
+        if (m === "manual-anchor") return "manual-anchor / 人工锚点"
+        if (m === "content-signature") return "content-signature / 关键帧签名"
+        if (m === "segment-pattern") return "segment-pattern / 分片模式"
+        if (m === "relative") return "relative / 相对比较"
+        return m || "-"
+    }
+
     function group(n) {
         return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",")
     }
@@ -495,7 +512,12 @@ ApplicationWindow {
             hasAnchorMs: (root.compareMode ? compareAnchorField.text.trim()
                                            : anchorField.text.trim()).length > 0,
             anchorMs: Number((root.compareMode ? compareAnchorField.text
-                                               : anchorField.text).trim())
+                                               : anchorField.text).trim()),
+            audioAlign: root.compareMode && root.audioAlignOn,
+            audioMaxSeconds: 7200,
+            audioMaxLagSeconds: 30,
+            audioWindowSeconds: 10,
+            audioLocalSearchSeconds: 4
         })
         var input = root.cstoreMode ? urlField.text.trim()
                                     : (root.isUrlMode ? urlField.text.trim()
@@ -1045,6 +1067,14 @@ ApplicationWindow {
                             ToolTip.text: "第二路也走分片回捞；关闭时按普通文件/流地址处理"
                             ToolTip.visible: hovered
                         }
+                        PrismButton {
+                            compact: true; variant: "toggle"
+                            toggled: root.audioAlignOn
+                            text: root.audioAlignOn ? "✓ 音频对齐" : "音频对齐"
+                            onClicked: root.audioAlignOn = !root.audioAlignOn
+                            ToolTip.text: "两路共用同一声场时（如同一教室前后机位），按音频互相关对齐；优先于人工锚点"
+                            ToolTip.visible: hovered
+                        }
                         TextField {
                             id: compareAnchorField
                             Layout.preferredWidth: 96
@@ -1075,7 +1105,7 @@ ApplicationWindow {
                     }
                     Text {
                         Layout.fillWidth: true
-                        text: "A / B 独立解析并分别输出帧表；「A / B」切源、「视频 / 音频」切帧类型。锚点可留空：优先 PDT，再尝试相同帧签名自动对齐。"
+                        text: "A / B 独立解析并分别输出帧表；「A / B」切源、「视频 / 音频」切帧类型。对齐优先级：PDT → 音频互相关 → 人工锚点。"
                         color: Theme.text3; font.family: Theme.uiFont; font.pixelSize: 11
                         elide: Text.ElideRight
                     }
@@ -1622,7 +1652,7 @@ ApplicationWindow {
                                         Layout.fillWidth: true
                                         spacing: 12
                                         Text {
-                                            text: "方法  " + (root.comparison.method || "-")
+                                            text: "方法  " + root.compareMethodLabel(root.comparison.method)
                                             color: root.comparison.confidence >= 1.0
                                                    ? Theme.success
                                                    : (root.comparison.confidence >= 0.5
@@ -1655,10 +1685,92 @@ ApplicationWindow {
                                     }
                                     Text {
                                         Layout.fillWidth: true
-                                        text: root.comparison.note || ""
+                                        text: (root.comparison.note || "") +
+                                              (Number(root.comparison.audioPeakRatio || 0) > 0
+                                               ? " · 互相关峰值 " +
+                                                 Number(root.comparison.audioPeakRatio).toFixed(1) + "×"
+                                               : "")
                                         color: Theme.text3
                                         font.family: Theme.uiFont
                                         font.pixelSize: 11
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    // 逐时段画面领先列表：把“谁快了几秒”直接写成文字。
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 4
+                                        visible: (root.comparison.audioLeads || []).length > 0
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: "画面领先时段（同一声场 · 音频互相关逐窗）"
+                                            color: Theme.accent
+                                            font.family: Theme.uiFont
+                                            font.pixelSize: 11
+                                            font.bold: true
+                                        }
+                                        Repeater {
+                                            model: root.comparison.audioLeads || []
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 8
+                                                Text {
+                                                    text: root.clock(modelData.start) +
+                                                          " → " + root.clock(modelData.end)
+                                                    color: Theme.text2
+                                                    font.family: Theme.monoFont
+                                                    font.pixelSize: 10
+                                                }
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    text: modelData.label +
+                                                          "（偏移 " +
+                                                          root.signedGroup(modelData.offsetMs) +
+                                                          " ms）"
+                                                    color: Theme.success
+                                                    font.family: Theme.uiFont
+                                                    font.pixelSize: 10
+                                                    elide: Text.ElideRight
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // 每路自己的音画同步摘要（与跨路对齐分开看）。
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 16
+                                        visible: root.compareMode && root.comparison.hasAudioTrack
+                                        Text {
+                                            text: "A 音画 " +
+                                                  Number((root.comparison.avSyncA || {}).audioVideoOffsetMs || 0).toFixed(0) +
+                                                  " ms · 分片跳变 " +
+                                                  ((root.comparison.avSyncA || {}).segmentShiftIssues || 0) + " 处"
+                                            color: Theme.text2
+                                            font.family: Theme.monoFont
+                                            font.pixelSize: 10
+                                        }
+                                        Text {
+                                            text: "B 音画 " +
+                                                  Number((root.comparison.avSyncB || {}).audioVideoOffsetMs || 0).toFixed(0) +
+                                                  " ms · 分片跳变 " +
+                                                  ((root.comparison.avSyncB || {}).segmentShiftIssues || 0) + " 处"
+                                            color: Theme.text2
+                                            font.family: Theme.monoFont
+                                            font.pixelSize: 10
+                                        }
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        visible: root.comparison.hasAudioTrack
+                                        text: "音频可靠窗 " +
+                                              Math.round((root.comparison.audioReliableRatio || 0) * 100) +
+                                              "% · 整体漂移 " +
+                                              Number(root.comparison.audioDriftMsPerMin || 0).toFixed(1) +
+                                              " ms/min（同一声场但两路音频可能不完全重叠，未匹配的时段不采信）"
+                                        color: Theme.text3
+                                        font.family: Theme.uiFont
+                                        font.pixelSize: 10
                                         wrapMode: Text.WordWrap
                                     }
                                     // 偏移随时间的变化：全局 offsetMs 看不出
@@ -1666,7 +1778,7 @@ ApplicationWindow {
                                     Rectangle {
                                         Layout.fillWidth: true
                                         Layout.preferredHeight: 96
-                                        visible: (root.comparison.windows || []).length > 1
+                                        visible: root.comparisonWindows.length > 1
                                         color: Theme.sunken
                                         radius: 5
                                         border.color: Theme.line2
@@ -1678,7 +1790,7 @@ ApplicationWindow {
                                                 if (!ctx) return
                                                 var W = width, H = height
                                                 ctx.clearRect(0, 0, W, H)
-                                                var wins = root.comparison.windows || []
+                                                var wins = root.comparisonWindows
                                                 if (wins.length < 2) return
                                                 var base = Number(root.comparison.offsetMs || 0)
                                                 var vals = []
@@ -1741,7 +1853,9 @@ ApplicationWindow {
                                             anchors.leftMargin: 8
                                             anchors.top: parent.top
                                             anchors.topMargin: 2
-                                            text: "OFFSET / 时间轴偏移（" +
+                                            text: (root.comparison.hasAudioTrack
+                                                   ? "A 相对 B 画面领先（音频逐窗，"
+                                                   : "OFFSET / 时间轴偏移（") +
                                                   Number(root.comparison.windowSeconds || 10).toFixed(0) +
                                                   "s 窗口，虚线=整体偏移）"
                                             color: Theme.text3
@@ -1751,7 +1865,7 @@ ApplicationWindow {
                                     }
                                     Text {
                                         Layout.fillWidth: true
-                                        visible: (root.comparison.windows || []).length > 1
+                                        visible: root.comparisonWindows.length > 1
                                         text: "漂移 " +
                                               Number(root.comparison.driftMsPerMin || 0).toFixed(1) +
                                               " ms/min · 最大偏差 " +

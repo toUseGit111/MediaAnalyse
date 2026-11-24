@@ -182,6 +182,34 @@ struct TimelineComparison {
     double maxDeviationMs = 0.0;
     std::vector<OffsetWindow> windows;
     std::vector<SyncAnomaly> anomalies;
+    // GCC-PHAT peak sharpness when method == "audio-xcorr"; 0 otherwise.
+    double audioPeakRatio = 0.0;
+
+    // Time-varying audio alignment (method == "audio-xcorr" with a track).
+    // `audioWindows` is the per-period offset curve; `audioLeads` lists the
+    // concrete periods where one side is ahead, with a plain-language label.
+    bool hasAudioTrack = false;
+    double audioReliableRatio = 0.0;
+    double audioDriftMsPerMin = 0.0;
+    double audioMaxDeviationMs = 0.0;
+    std::vector<OffsetWindow> audioWindows;   // start/end/offsetMs/samples(=sim%*100)
+    struct AudioLead {
+        double startSeconds = 0.0;
+        double endSeconds = 0.0;
+        double offsetMs = 0.0;      // median in the period
+        double deviationMs = 0.0;   // vs the modal baseline
+        std::string label;          // e.g. "A 画面快 1.2 秒"
+    };
+    std::vector<AudioLead> audioLeads;
+    // Per-file A/V sync summary (each recording's own lip-sync state).
+    struct AvSync {
+        double audioVideoOffsetMs = 0.0;  // audio start vs video reference
+        double maxSegmentShiftMs = 0.0;   // worst intra-segment phase change
+        int avOffsetIssues = 0;
+        int segmentShiftIssues = 0;
+    };
+    AvSync avSyncA;
+    AvSync avSyncB;
 };
 
 // Best-effort offset recovery without a wall-clock tag. When two recordings
@@ -213,15 +241,23 @@ ContentOffset estimateContentOffset(const AnalysisResult& a,
 ContentOffset estimateSegmentPatternOffset(const AlignmentReport& a,
                                            const AlignmentReport& b);
 
-// Compare two recordings. With PDT on both sides this is an exact wall-clock
-// offset. Without PDT, matching frame signatures are tried first; an operator
-// may still override everything with `manualAnchorMs` (a known sync point such
-// as a clap / timecode). Passing the full results enables the signature path;
-// the CLI and the GUI worker both keep their frame lists, so they do.
+struct AudioCorrelationResult;  // defined in AudioCorrelation.hpp
+
+// Compare two recordings. Priority: PDT (exact wall clock) > audio GCC-PHAT
+// (shared sound field, camera-angle independent) > manual anchor > frame
+// signatures > segment pattern > relative. Passing the full results enables
+// the signature path; the CLI and the GUI worker both keep their frame lists.
+// `audio` carries an optional GCC-PHAT result computed by infra from the two
+// decoded audio tracks; when it is ok, it wins over the manual anchor because
+// it is objective physical evidence rather than an operator estimate. The
+// segment-pattern curve is deliberately NOT attached in that case: for
+// differently-encoded views of one scene its quantised steps are an artifact
+// of packet-count pairing, not a real desync.
 TimelineComparison compareTimelines(const AlignmentReport& a,
                                     const AlignmentReport& b,
                                     std::optional<double> manualAnchorMs = std::nullopt,
                                     const AnalysisResult* aResult = nullptr,
-                                    const AnalysisResult* bResult = nullptr);
+                                    const AnalysisResult* bResult = nullptr,
+                                    const AudioCorrelationResult* audio = nullptr);
 
 } // namespace ma

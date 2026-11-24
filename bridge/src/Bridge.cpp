@@ -378,6 +378,7 @@ static QVariantMap comparisonToVariantMap(const ma::TimelineComparison& c) {
         {"windowSeconds", c.windowSeconds},
         {"driftMsPerMin", c.driftMsPerMin},
         {"maxDeviationMs", c.maxDeviationMs},
+        {"audioPeakRatio", c.audioPeakRatio},
     };
     QVariantList windows;
     for (const auto& w : c.windows) {
@@ -400,6 +401,46 @@ static QVariantMap comparisonToVariantMap(const ma::TimelineComparison& c) {
     }
     m["windows"] = windows;
     m["anomalies"] = anomalies;
+
+    // Time-varying audio alignment: per-period offset curve + readable leads.
+    QVariantList audioWindows;
+    for (const auto& w : c.audioWindows) {
+        audioWindows.append(QVariantMap{
+            {"start", w.startSeconds},
+            {"end", w.endSeconds},
+            {"offsetMs", w.offsetMs},
+            {"similarity", w.sampleCount >= 0 ? w.sampleCount / 100.0 : 0.0},
+            {"reliable", w.sampleCount >= 0},
+        });
+    }
+    QVariantList audioLeads;
+    for (const auto& l : c.audioLeads) {
+        audioLeads.append(QVariantMap{
+            {"start", l.startSeconds},
+            {"end", l.endSeconds},
+            {"offsetMs", l.offsetMs},
+            {"deviationMs", l.deviationMs},
+            {"label", QString::fromStdString(l.label)},
+        });
+    }
+    m["hasAudioTrack"] = c.hasAudioTrack;
+    m["audioReliableRatio"] = c.audioReliableRatio;
+    m["audioDriftMsPerMin"] = c.audioDriftMsPerMin;
+    m["audioMaxDeviationMs"] = c.audioMaxDeviationMs;
+    m["audioWindows"] = audioWindows;
+    m["audioLeads"] = audioLeads;
+    m["avSyncA"] = QVariantMap{
+        {"audioVideoOffsetMs", c.avSyncA.audioVideoOffsetMs},
+        {"maxSegmentShiftMs", c.avSyncA.maxSegmentShiftMs},
+        {"avOffsetIssues", c.avSyncA.avOffsetIssues},
+        {"segmentShiftIssues", c.avSyncA.segmentShiftIssues},
+    };
+    m["avSyncB"] = QVariantMap{
+        {"audioVideoOffsetMs", c.avSyncB.audioVideoOffsetMs},
+        {"maxSegmentShiftMs", c.avSyncB.maxSegmentShiftMs},
+        {"avOffsetIssues", c.avSyncB.avOffsetIssues},
+        {"segmentShiftIssues", c.avSyncB.segmentShiftIssues},
+    };
     return m;
 }
 
@@ -460,6 +501,16 @@ void AnalysisController::start(const QString& rawInput, const QVariantMap& optio
         opts.hasAnchorMs = options.value("hasAnchorMs").toBool();
     if (options.contains("anchorMs"))
         opts.anchorMs = options.value("anchorMs").toDouble();
+    if (options.contains("audioAlign"))
+        opts.audioAlign = options.value("audioAlign").toBool();
+    if (options.contains("audioMaxSeconds"))
+        opts.audioMaxSeconds = options.value("audioMaxSeconds").toDouble();
+    if (options.contains("audioMaxLagSeconds"))
+        opts.audioMaxLagSeconds = options.value("audioMaxLagSeconds").toDouble();
+    if (options.contains("audioWindowSeconds"))
+        opts.audioWindowSeconds = options.value("audioWindowSeconds").toDouble();
+    if (options.contains("audioLocalSearchSeconds"))
+        opts.audioLocalSearchSeconds = options.value("audioLocalSearchSeconds").toDouble();
 
     // FFmpeg's Windows file protocol expects UTF-8. QString::toStdString()
     // uses the local 8-bit codepage (GBK on zh-CN), which corrupts non-ASCII

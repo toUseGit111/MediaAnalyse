@@ -1,6 +1,7 @@
 // ma::core - HLS timeline + alignment diagnostics. See Alignment.hpp for the
 // contract: PDT is an OPTIONAL anchor, never a prerequisite.
 #include "ma/core/Alignment.hpp"
+#include "ma/core/AudioCorrelation.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -927,7 +928,8 @@ TimelineComparison compareTimelines(const AlignmentReport& a,
                                     const AlignmentReport& b,
                                     std::optional<double> manualAnchorMs,
                                     const AnalysisResult* aResult,
-                                    const AnalysisResult* bResult) {
+                                    const AnalysisResult* bResult,
+                                    const AudioCorrelationResult* audio) {
     TimelineComparison c;
     c.firstWallClockA = a.firstWallClockMs;
     c.firstWallClockB = b.firstWallClockMs;
@@ -982,6 +984,113 @@ TimelineComparison compareTimelines(const AlignmentReport& a,
         c.note = "A=" + ta + "，B=" + tb + "，A 相对 B " +
                  msText(c.offsetMs) + " ms（PDT 绝对墙上时钟）";
         attachTimeline(c);
+        return c;
+    }
+
+    // Audio GCC-PHAT: objective evidence from the shared sound field. It wins
+    // over a manual anchor (which is only an operator estimate) and, unlike the
+    // content/signature track, it is not polluted by the segment-pattern
+    // quantisation artifact when the two cameras encode differently.
+    // Per-file A/V sync summary: this recording's OWN lip-sync state. It is a
+    // separate question from cross-file alignment, but both are needed to
+    // judge "are the pictures in sync" - a shared-sound offset alone cannot
+    // tell whether each camera's picture sits on top of its own audio.
+    auto avSummary = [](const AlignmentReport& r, TimelineComparison::AvSync& out) {
+        for (const auto& m : r.streams) {
+            if (m.kind == StreamKind::Audio)
+                out.audioVideoOffsetMs = m.startOffsetMs;
+        }
+        for (const auto& issue : r.issues) {
+            if (issue.code == "av-offset") ++out.avOffsetIssues;
+            else if (issue.code == "segment-av-shift") {
+                ++out.segmentShiftIssues;
+                // The phase jump is embedded in the human-readable message;
+                // its magnitude is surfaced via the issue list, here we only
+                // count occurrences.
+            }
+        }
+    };
+    avSummary(a, c.avSyncA);
+    avSummary(b, c.avSyncB);
+
+    if (audio && audio->ok && audio->confidence > 0.0) {
+        c.comparable = true;
+        c.method = "audio-xcorr";
+        c.offsetMs = audio->offsetMs;
+        c.confidence = audio->confidence;
+        c.audioPeakRatio = audio->peakRatio;
+        c.note = audio->note;
+
+        if (audio->hasTrack && audio->track.ok) {
+            const auto& t = audio->track;
+            c.hasAudioTrack = true;
+            c.audioReliableRatio = t.reliableRatio;
+            c.audioDriftMsPerMin = t.driftMsPerMin;
+            c.audioMaxDeviationMs = t.maxDeviationMs;
+            // Modal baseline from the track is more robust than the short
+            // global window when the two recordings are not fully overlapping.
+            c.offsetMs = t.baseOffsetMs;
+            for (const auto& w : t.windows) {
+                OffsetWindow ow;
+                ow.startSeconds = w.startSeconds;
+                ow.endSeconds = w.endSeconds;
+                ow.offsetMs = w.offsetMs;
+                // Encode similarity in sampleCount for the wire format; the
+                // dedicated field below carries reliability separately.
+                ow.sampleCount = w.reliable
+                                     ? static_cast<int>(w.similarity * 100.0)
+                                     : -1;
+                c.audioWindows.push_back(ow);
+            }
+            // Collapse consecutive reliable windows whose offset deviates from
+            // the baseline into readable "X is ahead by N seconds" periods.
+            const double threshold = std::max(120.0, t.maxDeviationMs * 0.5);
+            bool inGroup = false;
+            double gStart = 0.0, gEnd = 0.0;
+            std::vector<double> gOffsets;
+            auto closeGroup = [&]() {
+                if (!inGroup || gOffsets.empty()) return;
+                TimelineComparison::AudioLead lead;
+                lead.startSeconds = gStart;
+                lead.endSeconds = gEnd;
+                lead.offsetMs = medianValue(gOffsets);
+                lead.deviationMs = lead.offsetMs - t.baseOffsetMs;
+                // Positive offset = A's picture ahead. Label from the viewer's
+                // perspective in plain language with the gap in seconds.
+                const double gapSec = std::fabs(lead.offsetMs) / 1000.0;
+                const double devSec = std::fabs(lead.deviationMs) / 1000.0;
+                const char* ahead = lead.offsetMs > 0 ? "A 画面快" : "B 画面快";
+                const char* dir = lead.deviationMs > 0 ? "+" : "-";
+                char b[128];
+                if (std::fabs(lead.deviationMs) < 50.0)
+                    std::snprintf(b, sizeof(b), "%s %.1f 秒", ahead, gapSec);
+                else
+                    std::snprintf(b, sizeof(b), "%s %.1f 秒（较整体基准 %s%.1f 秒）",
+                                  ahead, gapSec, dir, devSec);
+                lead.label = b;
+                c.audioLeads.push_back(lead);
+                gOffsets.clear();
+                inGroup = false;
+            };
+            for (const auto& w : t.windows) {
+                if (!w.reliable) { closeGroup(); continue; }
+                if (std::fabs(w.offsetMs - t.baseOffsetMs) > threshold) {
+                    if (!inGroup) { inGroup = true; gStart = w.startSeconds; }
+                    gEnd = w.endSeconds;
+                    gOffsets.push_back(w.offsetMs);
+                } else {
+                    closeGroup();
+                }
+            }
+            closeGroup();
+            std::sort(c.audioLeads.begin(), c.audioLeads.end(),
+                      [](const TimelineComparison::AudioLead& x,
+                         const TimelineComparison::AudioLead& y) {
+                          return std::fabs(x.deviationMs) >
+                                 std::fabs(y.deviationMs);
+                      });
+            if (c.audioLeads.size() > 8) c.audioLeads.resize(8);
+        }
         return c;
     }
 

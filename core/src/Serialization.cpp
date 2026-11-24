@@ -336,6 +336,7 @@ void appendComparison(std::string& o, const ma::TimelineComparison& c) {
     o += "\"windowSeconds\":" + jnum(c.windowSeconds) + ",";
     o += "\"driftMsPerMin\":" + jnum(c.driftMsPerMin) + ",";
     o += "\"maxDeviationMs\":" + jnum(c.maxDeviationMs) + ",";
+    o += "\"audioPeakRatio\":" + jnum(c.audioPeakRatio) + ",";
     o += "\"windows\":[";
     for (size_t i = 0; i < c.windows.size(); ++i) {
         if (i) o += ",";
@@ -355,7 +356,44 @@ void appendComparison(std::string& o, const ma::TimelineComparison& c) {
              ",\"deviationMs\":" + jnum(a.deviationMs) +
              ",\"kind\":" + jstr(a.kind) + "}";
     }
-    o += "]}";
+    // Time-varying audio alignment track (who is ahead in which period).
+    o += "],\"hasAudioTrack\":" + std::string(c.hasAudioTrack ? "true" : "false");
+    o += ",\"audioReliableRatio\":" + jnum(c.audioReliableRatio);
+    o += ",\"audioDriftMsPerMin\":" + jnum(c.audioDriftMsPerMin);
+    o += ",\"audioMaxDeviationMs\":" + jnum(c.audioMaxDeviationMs);
+    o += ",\"audioWindows\":[";
+    for (size_t i = 0; i < c.audioWindows.size(); ++i) {
+        if (i) o += ",";
+        const auto& w = c.audioWindows[i];
+        o += "{\"start\":" + jnum(w.startSeconds) +
+             ",\"end\":" + jnum(w.endSeconds) +
+             ",\"offsetMs\":" + jnum(w.offsetMs) +
+             ",\"similarity\":" + jnum(w.sampleCount < 0
+                                            ? 0.0
+                                            : w.sampleCount / 100.0) +
+             ",\"reliable\":" + std::string(w.sampleCount >= 0 ? "true" : "false") + "}";
+    }
+    o += "],\"audioLeads\":[";
+    for (size_t i = 0; i < c.audioLeads.size(); ++i) {
+        if (i) o += ",";
+        const auto& l = c.audioLeads[i];
+        o += "{\"start\":" + jnum(l.startSeconds) +
+             ",\"end\":" + jnum(l.endSeconds) +
+             ",\"offsetMs\":" + jnum(l.offsetMs) +
+             ",\"deviationMs\":" + jnum(l.deviationMs) +
+             ",\"label\":" + jstr(l.label) + "}";
+    }
+    o += "],\"avSyncA\":{\"audioVideoOffsetMs\":" +
+         jnum(c.avSyncA.audioVideoOffsetMs) +
+         ",\"maxSegmentShiftMs\":" + jnum(c.avSyncA.maxSegmentShiftMs) +
+         ",\"avOffsetIssues\":" + std::to_string(c.avSyncA.avOffsetIssues) +
+         ",\"segmentShiftIssues\":" + std::to_string(c.avSyncA.segmentShiftIssues) + "}";
+    o += ",\"avSyncB\":{\"audioVideoOffsetMs\":" +
+         jnum(c.avSyncB.audioVideoOffsetMs) +
+         ",\"maxSegmentShiftMs\":" + jnum(c.avSyncB.maxSegmentShiftMs) +
+         ",\"avOffsetIssues\":" + std::to_string(c.avSyncB.avOffsetIssues) +
+         ",\"segmentShiftIssues\":" + std::to_string(c.avSyncB.segmentShiftIssues) + "}";
+    o += "}";
 }
 
 // ---- string <-> enum helpers ----------------------------------------------
@@ -493,6 +531,7 @@ ma::TimelineComparison parseComparison(const JVal& v) {
     c.windowSeconds = jd(v.find("windowSeconds"), 10.0);
     c.driftMsPerMin = jd(v.find("driftMsPerMin"));
     c.maxDeviationMs = jd(v.find("maxDeviationMs"));
+    c.audioPeakRatio = jd(v.find("audioPeakRatio"));
     if (const JVal* arr = v.find("windows"); arr && arr->isArray()) {
         for (const auto& wv : arr->arr) {
             ma::OffsetWindow w;
@@ -513,6 +552,45 @@ ma::TimelineComparison parseComparison(const JVal& v) {
             a.kind = js(av.find("kind"));
             c.anomalies.push_back(a);
         }
+    }
+    if (const JVal* x = v.find("hasAudioTrack")) c.hasAudioTrack = x->asBool();
+    c.audioReliableRatio = jd(v.find("audioReliableRatio"));
+    c.audioDriftMsPerMin = jd(v.find("audioDriftMsPerMin"));
+    c.audioMaxDeviationMs = jd(v.find("audioMaxDeviationMs"));
+    if (const JVal* arr = v.find("audioWindows"); arr && arr->isArray()) {
+        for (const auto& wv : arr->arr) {
+            ma::OffsetWindow w;
+            w.startSeconds = jd(wv.find("start"));
+            w.endSeconds = jd(wv.find("end"));
+            w.offsetMs = jd(wv.find("offsetMs"));
+            const bool rel = jd(wv.find("reliable"), 0.0) > 0.5;
+            w.sampleCount = rel ? static_cast<int>(jd(wv.find("similarity")) * 100.0)
+                                : -1;
+            c.audioWindows.push_back(w);
+        }
+    }
+    if (const JVal* arr = v.find("audioLeads"); arr && arr->isArray()) {
+        for (const auto& lv : arr->arr) {
+            ma::TimelineComparison::AudioLead l;
+            l.startSeconds = jd(lv.find("start"));
+            l.endSeconds = jd(lv.find("end"));
+            l.offsetMs = jd(lv.find("offsetMs"));
+            l.deviationMs = jd(lv.find("deviationMs"));
+            l.label = js(lv.find("label"));
+            c.audioLeads.push_back(l);
+        }
+    }
+    if (const JVal* x = v.find("avSyncA"); x && x->isObject()) {
+        c.avSyncA.audioVideoOffsetMs = jd(x->find("audioVideoOffsetMs"));
+        c.avSyncA.maxSegmentShiftMs = jd(x->find("maxSegmentShiftMs"));
+        c.avSyncA.avOffsetIssues = static_cast<int>(ji(x->find("avOffsetIssues")));
+        c.avSyncA.segmentShiftIssues = static_cast<int>(ji(x->find("segmentShiftIssues")));
+    }
+    if (const JVal* x = v.find("avSyncB"); x && x->isObject()) {
+        c.avSyncB.audioVideoOffsetMs = jd(x->find("audioVideoOffsetMs"));
+        c.avSyncB.maxSegmentShiftMs = jd(x->find("maxSegmentShiftMs"));
+        c.avSyncB.avOffsetIssues = static_cast<int>(ji(x->find("avOffsetIssues")));
+        c.avSyncB.segmentShiftIssues = static_cast<int>(ji(x->find("segmentShiftIssues")));
     }
     return c;
 }
@@ -762,6 +840,11 @@ std::string toOptionsJson(const AnalysisOptions& o) {
     s += "\"anchorMs\":" + jnum(o.anchorMs) + ",";
     s += std::string("\"compareFullOutput\":") +
          (o.compareFullOutput ? "true" : "false") + ",";
+    s += std::string("\"audioAlign\":") + (o.audioAlign ? "true" : "false") + ",";
+    s += "\"audioMaxSeconds\":" + jnum(o.audioMaxSeconds) + ",";
+    s += "\"audioMaxLagSeconds\":" + jnum(o.audioMaxLagSeconds) + ",";
+    s += "\"audioWindowSeconds\":" + jnum(o.audioWindowSeconds) + ",";
+    s += "\"audioLocalSearchSeconds\":" + jnum(o.audioLocalSearchSeconds) + ",";
     s += "\"extraOptions\":[";
     for (size_t i = 0; i < o.extraOptions.size(); ++i) {
         s += "{\"k\":" + jstr(o.extraOptions[i].first) +
@@ -794,6 +877,11 @@ bool fromOptionsJson(const JVal& root, AnalysisOptions& o) {
     if (const JVal* x = root.find("hasAnchorMs")) o.hasAnchorMs = x->asBool();
     if (const JVal* x = root.find("anchorMs"); x && x->isNumber()) o.anchorMs = x->asDouble();
     if (const JVal* x = root.find("compareFullOutput")) o.compareFullOutput = x->asBool();
+    if (const JVal* x = root.find("audioAlign")) o.audioAlign = x->asBool();
+    if (const JVal* x = root.find("audioMaxSeconds"); x && x->isNumber()) o.audioMaxSeconds = x->asDouble();
+    if (const JVal* x = root.find("audioMaxLagSeconds"); x && x->isNumber()) o.audioMaxLagSeconds = x->asDouble();
+    if (const JVal* x = root.find("audioWindowSeconds"); x && x->isNumber()) o.audioWindowSeconds = x->asDouble();
+    if (const JVal* x = root.find("audioLocalSearchSeconds"); x && x->isNumber()) o.audioLocalSearchSeconds = x->asDouble();
     if (const JVal* eo = root.find("extraOptions"); eo && eo->isArray()) {
         for (const auto& e : eo->arr) {
             if (!e.isObject()) continue;

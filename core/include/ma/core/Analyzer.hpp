@@ -69,6 +69,22 @@ struct AnalysisOptions {
     // frame list (tagged source:"B") instead of silently analyzing it only for
     // alignment. The CLI leaves this false, so its wire behaviour is unchanged.
     bool compareFullOutput = false;
+    // Cross-view audio alignment: decode both recordings' audio to 16 kHz mono
+    // and align by GCC-PHAT cross-correlation. This is the reliable method when
+    // two cameras share one sound field but see different pictures (e.g. front
+    // and back cameras in a classroom) and neither playlist carries PDT.
+    // Default off to keep the existing wire behaviour unchanged.
+    bool audioAlign = false;
+    // Seconds of audio decoded per side for correlation. The windowed track
+    // needs the whole recording, so the GUI raises this to the observed
+    // duration; default stays small for the CLI's global-only path.
+    double audioMaxSeconds = 120.0;
+    // Lag search half-window in seconds (default 30 => +/-30 s).
+    double audioMaxLagSeconds = 30.0;
+    // Windowed audio alignment: window length (s) and local jitter half-window
+    // (s) around the global offset. Only used when audioAlign is true.
+    double audioWindowSeconds = 10.0;
+    double audioLocalSearchSeconds = 4.0;
 };
 
 struct Progress {

@@ -127,6 +127,7 @@ media-analyse-cli [--json] [--frames[=N]] [--decode] \
                   [--connect-timeout S] [--stall-timeout S] [--probe-timeout S] \
                   [--opt K=V] [--cstore [--fetch-dir DIR] [--fetch-jobs N] [--fetch-timeout S]] \
                   [--no-align] [--compare <file>] [--anchor-ms N] \
+                  [--audio-align] [--audio-seconds S] [--audio-lag S] \
                   <url|file>
 ```
 
@@ -176,13 +177,17 @@ media-analyse-cli --compare other.m3u8 --anchor-ms 1500 record/index.m3u8  # 无
 media-analyse-cli --no-align record/index.m3u8                   # 跳过后处理，只要原始包
 ```
 
-`--compare` 在 JSON 里输出 `comparison{method,offsetMs,confidence,overlapSeconds,note,windows,anomalies,driftMsPerMin,maxDeviationMs}`，按可信度依次尝试：双方都有 PDT → `method=pdt`（置信度 1.0）；无 PDT 但两路有相同编码的关键帧 → `method=content-signature`（置信度 0.35~0.85）；编码不同但分片包数序列一致 → `method=segment-pattern`（置信度 0.4，绝对偏移有周期歧义，重点看漂移与异常时段）；否则可用 `--anchor-ms` 指定共同事件得到 `manual-anchor`（置信度 0.5）；都没有才降级为 `relative`（置信度 0）。**不会在没有证据时编造一个看起来精确的偏移。**
+`--compare` 在 JSON 里输出 `comparison{method,offsetMs,confidence,overlapSeconds,note,windows,anomalies,driftMsPerMin,maxDeviationMs,audioPeakRatio,hasAudioTrack,audioWindows,audioLeads,audioReliableRatio,audioDriftMsPerMin,audioMaxDeviationMs,avSyncA,avSyncB}`，按可信度依次尝试：双方都有 PDT → `method=pdt`（置信度 1.0）；**多机位共享同一声场时先试音频互相关 → `method=audio-xcorr`（置信度随峰值/波形相似度，最高 0.95）**；无 PDT 但两路有相同编码的关键帧 → `method=content-signature`（置信度 0.35~0.85）；编码不同但分片包数序列一致 → `method=segment-pattern`（置信度 0.4，绝对偏移有周期歧义，重点看漂移与异常时段）；否则可用 `--anchor-ms` 指定共同事件得到 `manual-anchor`（置信度 0.5）；都没有才降级为 `relative`（置信度 0）。**不会在没有证据时编造一个看起来精确的偏移。**
+
+**音频互相关对齐（`--audio-align` / GUI「音频对齐」开关）**：适用于同一场景不同机位、画面相关但不同（例如教室前后两个摄像头）、且没有 PDT 的录制。两路摄像头看到不同画面，但共享同一声场——拍手、铃声、讲话在两路音频里都出现。工具把两路音轨解码为 4 kHz 单声道，用 GCC-PHAT 互相关求全局偏移种子，并用归一化波形相似度剔除相位巧合（例如两个不同频率的音调）。对齐结果与视角无关，置信度 0.95；`comparison.note` 会列出互相关峰值与波形相似度。默认搜索 ±30 秒，可用 `--audio-lag` 调整。注意两路麦克风到声源距离不同会带来毫秒级物理传播差，这是正常现象，不是设备故障。音频对齐优先于人工锚点；若某路没有音轨会明确报错而不是猜测。
+
+**分时段画面领先（同一声场、可能不完全重叠）**：GUI 开启「音频对齐」后会解码两路**全程**音轨（4 kHz，40 分钟约 36 MB/路），先求全局偏移种子，再按 10 秒窗口滑动、在种子附近 ±4 秒逐窗做互相关，得到 `comparison.audioWindows`（每窗 offsetMs/similarity/reliable）。只有波形真正匹配的窗口才采信，静音或只在一路出现的时段会被标记不可靠、不参与基准，因此两路起止时间不同或中途丢段也能处理。基准偏移取可靠窗的**众数**（抗中途台阶），偏离基准的连续时段折叠为 `comparison.audioLeads`，每条带可直接读懂的 label，例如「A 画面快 1.8 秒（较整体基准 +1.5 秒）」。`comparison` 还给出 `audioReliableRatio`（可靠窗占比）、`audioDriftMsPerMin`（整体漂移）、`audioMaxDeviationMs`。符号约定：offsetMs 为正 = A 起点晚 = **A 画面进度更靠前/更快**。GUI 的 COMPARISON 卡片新增「画面领先时段」列表、逐窗偏移曲线（虚线为整体基准）、每路自身的音画同步摘要（`avSyncA/B`：各自 audio-video 起始偏移、分片相位跳变处数）以及可靠率/漂移说明。同一声场的音频是确认画面同步差的客观依据，与各摄像头视角无关；每一路自己的音画同步则是独立问题，两者需分开判断。CLI 对应 `--audio-seconds`（提高到全时长）、`--audio-window`（窗口秒数）、`--audio-local-lag`（局部搜索半窗）。
 
 GUI：SUMMARY 折叠分组底部新增 `ALIGNMENT / 对齐诊断` 折叠头，默认只占一行（时间基准 + 错误/警告数，不挤压帧表），点开展示墙上时钟起止、每条流的起始偏移 / 时钟漂移 / 最大空档，以及问题列表。
 
 **GUI 双流 / 双文件对比**：顶栏按钮在「单流分析」与「多流对比」之间切换。多流对比时 SOURCE 面板出现 A / B 两行输入：A 沿用原有的本地文件 / 网络流切换，B 接受本地文件路径或任意流地址，也可单独勾选 `cstore` 把 B 当作对象键回捞。点击「对比解析」后，同一个 worker 依次分析两路输入，但把 A / B 的流信息、帧批次和最终结果分别标记为 `source:"A"` / `source:"B"` 送回 GUI，两套表格模型互不覆盖。工具栏新增「源 A / 源 B」切换，配合「视频 / 音频」即可分别查看两路的逐帧信息；SUMMARY 的 `DUAL SOURCE / 双路状态` 卡片显示各自的包数、流数、视频/音频帧数，点击卡片也能切换当前帧表。对比结果作为 `COMPARISON / 双路对比` 卡片显示在 ALIGNMENT 展开区底部，列出方法、偏移、置信度、重叠秒数、说明、A/B 结构差异（包数 / 流数 / 视频音频帧数及 Δ），以及**按 10 秒窗口绘制的偏移曲线**：虚线为整体偏移，红色段为异常时段，下面直接列出「`mm:ss → mm:ss` 突变/局部偏移 +X ms」。这样播放中“某一段时间不同步”会落到具体时间区间，而不再只是一个全局平均偏移。颜色按置信度区分：1.0 绿（PDT 精确）、0.35~0.85 黄（帧签名 / 人工锚点）、0 红（只能相对比较）。
 
-人工锚点毫秒偏移直接放在 B 路输入行（「锚点 ms」），无需打开配置；留空即按 PDT → 帧签名 → 相对比较的顺序自动选择。A / B 都可以是 cstore 对象键，各自回捞到独立的临时目录，避免路径冲突。
+B 路输入行还有「音频对齐」开关：同一声场多机位时打开它，对齐优先级变为 PDT → 音频互相关 → 人工锚点 → 帧签名 → 分片模式 → 相对比较。人工锚点毫秒偏移也直接放在 B 路输入行（「锚点 ms」），无需打开配置。A / B 都可以是 cstore 对象键，各自回捞到独立的临时目录，避免路径冲突。
 
 回归：`python tests/alignment_cli_test.py`（12 项，四种真实清单 + IPC + 三种比较模式；样本缺失时用 ffmpeg 自动再生成）、`ctest` 中的 `alignment_test`（40 项纯算法单测）。
 

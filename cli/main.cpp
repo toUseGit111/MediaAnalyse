@@ -25,6 +25,13 @@
 //                         exact with #EXT-X-PROGRAM-DATE-TIME, otherwise a
 //                         clearly-labelled relative/manual alignment
 //   --anchor-ms N         manual sync point for --compare when PDT is absent
+//   --audio-align         align --compare by GCC-PHAT + sliding-window track;
+//                         best for different camera angles in one sound field
+//   --audio-seconds S     seconds of audio per side (default 120, max 7200;
+//                         raise to the full duration for per-period offset)
+//   --audio-lag S         global lag search half-window seconds (default 30)
+//   --audio-window S      per-period analysis window seconds (default 10)
+//   --audio-local-lag S   local jitter half-window around global offset (s)
 //                         (positive = primary starts later, in milliseconds)
 // Exit codes: 0 ok, 1 failure (diagnostic printed), 2 usage error.
 #include <algorithm>
@@ -39,6 +46,7 @@
 #include <vector>
 
 #include "ma/core/Analyzer.hpp"
+#include "ma/core/AudioCorrelation.hpp"
 #include "ma/core/MediaInfo.hpp"
 #include "ma/core/Result.hpp"
 #include "ma/core/Serialization.hpp"
@@ -46,6 +54,7 @@
 #include "ma/infra/Interrupt.hpp"
 #include "ma/infra/ProbeAnalyzer.hpp"
 #include "ma/infra/CstoreFetcher.hpp"
+#include "ma/infra/AudioDecoder.hpp"
 #include "ma/infra/CrashHandler.hpp"
 #include "ma/infra/Logger.hpp"
 
@@ -280,6 +289,16 @@ int main(int argc, char** argv) {
             std::string value = v.size() > 12 ? v.substr(12) : std::string();
             if (value.empty() && i + 1 < a.size()) value = a[++i];
             args.anchorMs = std::atof(value.c_str());
+        } else if (v == "--audio-align") {
+            args.opts.audioAlign = true;
+        } else if (v == "--audio-seconds") {
+            args.opts.audioMaxSeconds = std::atof(optArg(a, i).c_str());
+        } else if (v == "--audio-lag") {
+            args.opts.audioMaxLagSeconds = std::atof(optArg(a, i).c_str());
+        } else if (v == "--audio-window") {
+            args.opts.audioWindowSeconds = std::atof(optArg(a, i).c_str());
+        } else if (v == "--audio-local-lag") {
+            args.opts.audioLocalSearchSeconds = std::atof(optArg(a, i).c_str());
         } else if (v == "--opt") {
             std::string kv = optArg(a, i);
             auto eq = kv.find('=');
@@ -300,7 +319,8 @@ int main(int argc, char** argv) {
                       "[--connect-timeout S] [--stall-timeout S] [--probe-timeout S] "
                       "[--opt K=V] [--cstore [--fetch-dir DIR] [--fetch-jobs N] "
                       "[--fetch-timeout S]] [--no-align] [--compare <file>] "
-                      "[--anchor-ms N] <url|file>");
+                      "[--anchor-ms N] [--audio-align] "
+                      "[--audio-seconds S] [--audio-lag S] <url|file>");
             return 2;
         } else if (!v.empty() && v[0] == '-' && v.size() > 1) {
             std::fprintf(stderr, "unknown option: %s\n", v.c_str());
@@ -392,8 +412,46 @@ int main(int argc, char** argv) {
             outcome.value.alignment ? *outcome.value.alignment : emptyA;
         const ma::AlignmentReport& B =
             second.value.alignment ? *second.value.alignment : emptyB;
+        std::optional<ma::AudioCorrelationResult> audio;
+        if (args.opts.audioAlign && outcome.ok() && second.ok()) {
+            const int kRate = 4000;
+            const double budget = std::clamp(args.opts.audioMaxSeconds, 1.0, 7200.0);
+            auto aPcm = ma::infra::decodeAudioMono(
+                args.input, &cancel, args.opts, budget, kRate);
+            auto bPcm = ma::infra::decodeAudioMono(
+                args.compare, &cancel, args.opts, budget, kRate);
+            if (aPcm.ok() && bPcm.ok()) {
+                audio = ma::estimateAudioOffset(
+                    *aPcm, *bPcm, kRate,
+                    std::clamp(args.opts.audioMaxLagSeconds, 1.0, 300.0));
+                if (audio->ok) {
+                    ma::AudioTrackOptions trackOpt;
+                    trackOpt.windowSeconds = args.opts.audioWindowSeconds;
+                    trackOpt.hopSeconds = args.opts.audioWindowSeconds;
+                    trackOpt.localSearchSeconds = std::clamp(
+                        args.opts.audioLocalSearchSeconds, 0.25, 30.0);
+                    auto track = ma::estimateAudioOffsetTrack(
+                        *aPcm, *bPcm, kRate, audio->offsetMs, trackOpt);
+                    if (track.ok) {
+                        audio->hasTrack = true;
+                        audio->offsetMs = track.baseOffsetMs;
+                        audio->track = std::move(track);
+                    }
+                }
+                MA_LOGI("cli", "audio-xcorr ok=" << audio->ok
+                               << " offsetMs=" << audio->offsetMs
+                               << " track=" << audio->hasTrack
+                               << " peak=" << audio->peakRatio);
+            } else {
+                MA_LOGW("cli", "audio-xcorr decode failed: "
+                               << ma::infra::redact(
+                                      aPcm.ok() ? bPcm.diag.message
+                                                : aPcm.diag.message));
+            }
+        }
         comparison = ma::compareTimelines(A, B, args.anchorMs,
-                                          &outcome.value, &second.value);
+                                          &outcome.value, &second.value,
+                                          audio ? &*audio : nullptr);
         cmpPtr = &comparison;
         MA_LOGI("cli", "compare method=" << comparison.method
                         << " offsetMs=" << comparison.offsetMs

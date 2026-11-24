@@ -55,8 +55,8 @@ MediaAnalyse/
 
 | 目录 | 包含内容 | 边界规则 |
 |---|---|---|
-| `core/` | `Result.hpp`（`Outcome`/`Diagnostic`：**错误即数据**）、`MediaInfo.hpp`（`AnalysisResult`/`StreamInfo`/`FrameRecord`/`StageTimings`）、`Analyzer.hpp`（分析接口 + `AnalysisOptions`）、`Alignment.hpp/.cpp`（**HLS 时间轴与对齐诊断**：playlist 解析、PDT 可选的三档时间基准、诊断算法、跨文件比较）、`UrlNormalizer`（`file:///C:/` → `file:C:/` 等 7 类修正）、`Serialization`（**JSON wire format 契约**：`toJson`/`fromJson`/`parseAnalyzeRequest`，含 `alignment`/`comparison` 段） | 不 include 任何 Qt / FFmpeg 头；不含 I/O 策略 |
-| `infra/` | `Raii.hpp`（RAII）、`Interrupt.cpp`（`av_log` → 日志桥接 + 分阶段超时 + 协作取消）、`SliceType.hpp`（**同步 I/P/B 位流读取**：header-only、无 FFmpeg 依赖、逐包 slice header 解析）、`HlsTimeline.hpp/.cpp`（AVIO 读 m3u8 + `io_open` 分片归属追踪）、`ProbeAnalyzer.cpp`（open → find_stream_info → demux，可选解码）、`CstoreFetcher.hpp/.cpp`（**cstore 录制回捞**：WinHTTP 解析 downloadUrl、并发拉全分片、保留缺片空洞，产出本地清单）、`CrashHandler.cpp`（minidump + 异常过滤器）、`Logger.hpp/.cpp`（跨进程滚动文件日志 + 凭据脱敏 + 崩溃应急写入） | 只依赖 `core` + FFmpeg（+ Windows WinHTTP）；不出现 Qt |
+| `core/` | `Result.hpp`（`Outcome`/`Diagnostic`：**错误即数据**）、`MediaInfo.hpp`（`AnalysisResult`/`StreamInfo`/`FrameRecord`/`StageTimings`）、`Analyzer.hpp`（分析接口 + `AnalysisOptions`）、`Alignment.hpp/.cpp`（**HLS 时间轴与对齐诊断**：playlist 解析、PDT 可选的三档时间基准、诊断算法、跨文件比较，含逐时段 audioLeads 与每路 avSync 摘要）、`AudioCorrelation.hpp/.cpp`（GCC-PHAT 音频互相关纯数学：radix-2 FFT、波形相似度校验、**分时间窗 track** `estimateAudioOffsetTrack` 逐窗 NCC 门控 + 众数基准）、`UrlNormalizer`（`file:///C:/` → `file:C:/` 等 7 类修正）、`Serialization`（**JSON wire format 契约**：`toJson`/`fromJson`/`parseAnalyzeRequest`，含 `alignment`/`comparison` 段） | 不 include 任何 Qt / FFmpeg 头；不含 I/O 策略 |
+| `infra/` | `Raii.hpp`（RAII）、`Interrupt.cpp`（`av_log` → 日志桥接 + 分阶段超时 + 协作取消）、`SliceType.hpp`（**同步 I/P/B 位流读取**：header-only、无 FFmpeg 依赖、逐包 slice header 解析）、`HlsTimeline.hpp/.cpp`（AVIO 读 m3u8 + `io_open` 分片归属追踪）、`ProbeAnalyzer.cpp`（open → find_stream_info → demux，可选解码）、`CstoreFetcher.hpp、AudioDecoder.hpp/.cpp（FFmpeg 解码音轨为单声道 float，目标采样率可配，分时段对齐用 4 kHz 以覆盖全程；decodeAudioMono16k 为兼容包装）/.cpp`（**cstore 录制回捞**：WinHTTP 解析 downloadUrl、并发拉全分片、保留缺片空洞，产出本地清单）、`CrashHandler.cpp`（minidump + 异常过滤器）、`Logger.hpp/.cpp`（跨进程滚动文件日志 + 凭据脱敏 + 崩溃应急写入） | 只依赖 `core` + FFmpeg（+ Windows WinHTTP）；不出现 Qt |
 | `worker/` | `worker_main.cpp`：从 stdin 读一条 analyze 请求，向 stdout 流式写 progress、探测后的 `streams` 行与逐批 `frames` 行，最后写全量 result；独立线程监听 `cancel`；启动即装 CrashHandler | 只链接 `core`+`infra`，**不链接 Qt**；崩溃只死自己 |
 | `bridge/` | `Bridge.hpp/.cpp`：`AnalysisController`（`QProcess` 拉起 worker、解析 JSON、看门狗 + 自动重启一次、取消、`liveUpdated` 增量发布）、`FrameTableModel`（多列 `QAbstractTableModel` + 文本过滤 + 可见行映射 + `rowsAppended` 增量插入） | 唯一允许同时接触内核与 Qt 的层；QML 只认这一层 |
 | `app/` | `main.cpp`（`QApplication` + 命令行传参自动分析 + CrashHandler）、`qml/`（`Main.qml` 布局交互、`Theme.qml` 设计令牌单例、`PrismButton/SectionHead/MetricCell/StreamCard/FrameGrid` 组件） | QML 不直接碰 C++ 内核，全部经 `bridge` |
@@ -228,7 +228,7 @@ media-analyse.exe "rtsp://127.0.0.1:8554/live"
 | 工具栏「源 A / 源 B」 | 仅在多流对比模式出现，切换帧表显示 A 还是 B 的独立 frame store；与「视频 / 音频」组合即可分别查看两路的逐帧数据 |
 | 「DUAL SOURCE / 双路状态」 | 多流对比模式下显示，A/B 两卡片列出包数、流数、视频/音频帧数与解析状态，点击卡片切换当前帧表 |
 | 「ALIGNMENT / 对齐诊断」折叠头 | 分析完成后出现，默认只占一行（时间基准 + 错误/警告数），点击展开墙上时钟起止、每条流的起始偏移 / 时钟漂移 / 最大空档与问题列表；若做了两文件对比，底部另出 `COMPARISON / 双路对比` 卡片（方法 / 偏移 / 置信度 / 重叠 / 说明、A/B 包数/流数/帧数与 Δ，以及 10s 窗口偏移曲线、漂移、最大偏差与最多 3 段异常时段）。无 PDT 显示「相对时间轴」；有 PDT 显示「PDT 绝对时钟」 |
-| 「配置」 | 连接 / 无数据 / 探测三个超时、最大帧数、最大解码帧数、RTSP over TCP、自动重连、`K=V` 高级选项；**下次分析生效**。第二路输入与可选人工锚点 ms 都在 SOURCE 面板的 B 行 |
+| 「配置」 | 连接 / 无数据 / 探测三个超时、最大帧数、最大解码帧数、RTSP over TCP、自动重连、`K=V` 高级选项；**下次分析生效**。第二路输入、可选人工锚点 ms 与「音频对齐」开关都在 SOURCE 面板的 B 行 |
 | 提示条「详情」 | toast 展示完整诊断：错误码 / 阶段 / 原生码 / 地址 / `open Xs · probe Ys · demux Zs` |
 
 帧表 `type` 列同步读取**每个 packet 自己的 slice header**（H.264/H.265 `slice_type`、MPEG-1/2 `picture_coding_type`、全 I 编码直通 `I`），因此 `I` / `P` / `B` 都与该行的时间戳严格对应；`AV_PKT_FLAG_KEY` 作为权威兜底，保证真 IDR 不会被误标成 `P`。无法识别的码流才显示 `-`。概览「关键帧」独立按 `keyframe` 计数，不受 P/B 标签影响。**不用 `AVCodecParserContext`、也不用解码器输出**：`av_parser_parse2()` 吐出的是上一帧且 `pict_type` 会保持到下一帧被识别，贴到当前包行会造成帧类型与时间戳错配（实测 1 s GOP 的 RTSP 流出现「开头 3 个 I、之后每 GOP 2 个 I」）；增量快照行一经发布也无法事后回填。实现见 `infra/include/ma/infra/SliceType.hpp`，回归见 `tests/slice_type_test.cpp` / `tests/pict_type_test.py`。
@@ -352,8 +352,9 @@ JSON 信封（成功路径，节选）：
 | 配置里三个超时 | `--connect-timeout/--stall-timeout/--probe-timeout` |
 | 高级选项 `rtsp_transport=tcp` | `--opt rtsp_transport=tcp` |
 | 多流对比模式的 B 路输入（文件 / 流 / cstore key） | `--compare <file>`（CLI 仍只对比时间轴；GUI 额外输出 B 路帧表） |
+| B 行「音频对齐」开关（同一声场多机位） | `--audio-align`（可调 `--audio-seconds` / `--audio-lag` / `--audio-window` / `--audio-local-lag`；GUI 解码全程并逐 10 秒窗输出谁快谁慢） |
 | 同项填「人工锚点 ms」 | `--anchor-ms N` |
-| 留空锚点时自动按 PDT / 关键帧签名对齐 | CLI 与 GUI 共用 `compareTimelines()`，无 PDT 时匹配相同关键帧的包大小与帧类型推算偏移 |
+| 留空锚点时自动对齐 | CLI 与 GUI 共用 `compareTimelines()`，优先级 PDT → 音频互相关（若开启）→ 人工锚点 → 关键帧签名 → 分片模式 → 相对比较 |
 | 高级选项「cstore 录制回捞」 | `--cstore`（+ `--fetch-*`） |
 
 ---
